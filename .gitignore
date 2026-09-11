@@ -1,0 +1,65 @@
+# =========================================================
+# GitHub 上传策略：只保留 README、代码、.env.example
+# 数据（demo 知识/样本产物）、文档（docs/DESIGN/规范/调研）一律不传
+# =========================================================
+
+# ----- 默认全部忽略，再白名单放行代码 -----
+/*
+
+# 根 README + 忽略规则本身
+!README.md
+!.gitignore
+
+# ----- Java 业务代码 -----
+!pom.xml
+!src/
+!src/**
+
+# ----- AI 服务代码 -----
+!aftersales-kb-ai/
+!aftersales-kb-ai/README.md
+!aftersales-kb-ai/main.py
+!aftersales-kb-ai/requirements.txt
+!aftersales-kb-ai/.env.example
+!aftersales-kb-ai/app/
+!aftersales-kb-ai/app/**
+!aftersales-kb-ai/tests/
+!aftersales-kb-ai/tests/**
+!aftersales-kb-ai/scripts/
+!aftersales-kb-ai/scripts/**
+!aftersales-kb-ai/test_main.http
+
+# ----- 强制排除：密钥 / 缓存 / 环境 / 文档 / 数据 / 样例 -----
+aftersales-kb-ai/samples/
+.env
+.env.local
+*.env
+aftersales-kb-ai/.env
+aftersales-kb-ai/.venv/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+*.iml
+target/
+.ai-memory/
+.reorg-backup/
+.worktrees/
+.mimocode/
+research/
+docs/
+DESIGN.md
+代码设计规范.md
+aftersales-kb-ai/docs/
+aftersales-kb-ai/MinerU.md
+aftersales-kb-ai/MinerU_限流文档.md
+aftersales-kb-ai/uploads/
+aftersales-kb-ai/mineru_out/
+
+# OS
+Thumbs.db
+.DS_Store

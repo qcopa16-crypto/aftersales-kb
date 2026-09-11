@@ -1,0 +1,14 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+python-multipart>=0.0.9
+httpx>=0.27
+pymilvus>=2.4
+python-docx>=1.1
+langgraph>=0.2
+langchain-core>=0.3
+
+# Local embedding (optional, heavy):
+# FlagEmbedding
+# torch

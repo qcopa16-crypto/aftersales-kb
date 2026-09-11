@@ -1,0 +1,108 @@
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # auth
+    internal_token: str = "change-me-long-random"
+
+    # mineru
+    mineru_enabled: bool = True
+    mineru_api_base: str = "https://mineru.net"
+    mineru_token: str = ""
+    mineru_model_version: str = "vlm"
+    mineru_language: str = "ch"
+    mineru_enable_table: bool = True
+    mineru_enable_formula: bool = True
+    mineru_is_ocr: bool = False
+    mineru_poll_interval_sec: float = 3.0
+    mineru_poll_timeout_sec: float = 600.0
+    mineru_batch_size: int = 20
+
+    # embedding
+    embed_provider: str = "local"  # local | cloud | fake
+    embed_local_model: str = ""
+    embed_local_device: str = "cpu"
+    embed_cloud_base: str = ""
+    embed_cloud_key: str = ""
+    embed_cloud_model: str = "BAAI/bge-m3"
+    embed_dim: int = 1024
+    embed_batch_size: int = 16
+
+    # vector store
+    vector_store: str = "memory"  # milvus | memory
+    milvus_uri: str = "http://127.0.0.1:19530"
+    milvus_collection: str = "kb_chunks"
+
+    # server
+    host: str = "0.0.0.0"
+    port: int = 8000
+
+    # chunker defaults
+    chunk_size: int = 512
+    chunk_overlap: int = 50
+
+    # source_url download (MinIO presigned etc.)
+    max_source_bytes: int = 209_715_200  # 200MB
+    source_connect_timeout_sec: float = 10.0
+    source_read_timeout_sec: float = 180.0
+
+    # parse quality heuristics
+    qc_pdf_page_review: int = 20
+    qc_md_chars_review: int = 20_000
+    qc_image_review: int = 5
+    qc_empty_ratio_review: float = 0.05
+    qc_low_heading_ratio: float = 0.3
+
+    # VLM image captions (phase 2)
+    vlm_enabled: bool = False
+    vlm_api_base: str = ""
+    vlm_api_key: str = ""
+    vlm_model: str = ""
+    max_vlm_images: int = 12
+    vlm_timeout_sec: float = 60.0
+    vlm_max_image_bytes: int = 2_000_000
+
+    # concurrency / rate limits (aligned with vendor docs + product caps)
+    vlm_max_concurrency: int = 10
+    llm_max_concurrency: int = 5
+    # MinerU 精准 API：提交 50 文件/分钟，轮询 1000 次/分钟，日上限 5000 文件
+    mineru_max_concurrency: int = 1
+    mineru_batch_link_limit: int = 50
+    mineru_submit_per_minute: int = 50
+    mineru_poll_per_minute: int = 1000
+    mineru_daily_file_limit: int = 5000
+
+    # LLM generate (cloud OpenAI-compatible)
+    llm_api_base: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_temperature: float = 0.2
+    llm_timeout_sec: float = 120.0
+
+    # P1: parse idempotency + VLM caption cache
+    enable_parse_idempotency: bool = True
+    parse_cache_max: int = 256
+    vlm_caption_cache_max: int = 512
+    retrieve_top_k_default: int = 8
+
+    # P3: circuit breaker + embed resume
+    circuit_failure_threshold: int = 3
+    circuit_cooldown_sec: float = 60.0
+    embed_resume_enabled: bool = True
+    embed_partial_max: int = 32
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

@@ -1,0 +1,119 @@
+# Test aftersales-kb-ai
+
+## 当前脚手架
+
+### GET /
+
+```http
+GET http://127.0.0.1:8000/
+Accept: application/json
+```
+
+### GET /hello/{name}
+
+```http
+GET http://127.0.0.1:8000/hello/User
+Accept: application/json
+```
+
+---
+
+## 目标接口（实现后使用）
+
+> Token 与 `INTERNAL_TOKEN` 一致。
+
+### Health
+
+```http
+GET http://127.0.0.1:8000/health
+X-Internal-Token: change-me-long-random
+Accept: application/json
+```
+
+### Parse
+
+```http
+POST http://127.0.0.1:8000/internal/parse
+X-Internal-Token: change-me-long-random
+Content-Type: multipart/form-data; boundary=----Boundary
+
+------Boundary
+Content-Disposition: form-data; name="file"; filename="保修政策.md"
+Content-Type: text/markdown
+
+# 整机保修政策
+
+人为损坏不在免费保修范围。
+
+------Boundary--
+```
+
+### Embed
+
+```http
+POST http://127.0.0.1:8000/internal/embed
+X-Internal-Token: change-me-long-random
+Content-Type: application/json
+
+{
+  "unit_id": 1,
+  "chunks": [
+    {"chunk_index": 0, "content": "人为损坏不在免费保修范围。"}
+  ]
+}
+```
+
+### Retrieve
+
+```http
+POST http://127.0.0.1:8000/internal/retrieve
+X-Internal-Token: change-me-long-random
+Content-Type: application/json
+
+{
+  "question": "客户屏幕碎了能保修吗",
+  "top_k": 5
+}
+```
+
+### Generate
+
+```http
+POST http://127.0.0.1:8000/internal/generate
+X-Internal-Token: change-me-long-random
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "question": "客户屏幕碎了能保修吗",
+  "contexts": [
+    {
+      "unit_id": 1,
+      "title": "整机保修政策",
+      "content": "人为损坏不在免费保修范围。"
+    }
+  ]
+}
+```
+
+### Delete vectors
+
+```http
+DELETE http://127.0.0.1:8000/internal/units/1
+X-Internal-Token: change-me-long-random
+```
+
+### VLM describe
+
+```http
+POST http://127.0.0.1:8000/internal/vlm/describe
+X-Internal-Token: change-me-long-random
+Content-Type: multipart/form-data; boundary=----Boundary
+
+------Boundary
+Content-Disposition: form-data; name="file"; filename="nameplate.jpg"
+Content-Type: image/jpeg
+
+<bytes>
+------Boundary--
+```
