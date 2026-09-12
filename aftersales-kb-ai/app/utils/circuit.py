@@ -91,6 +91,29 @@ class Metrics:
                 }
             return {"counters": dict(self._counters), "timings": timings}
 
+    def to_prometheus_text(self) -> str:
+        """Minimal Prometheus text exposition; no third-party client."""
+        snap = self.snapshot()
+        lines: list[str] = []
+        for name, value in sorted(snap["counters"].items()):
+            metric = _prom_name(name)
+            lines.append(f"# TYPE {metric} counter")
+            lines.append(f"{metric} {value}")
+        for name, stats in sorted(snap["timings"].items()):
+            metric = _prom_name(name)
+            lines.append(f"# TYPE {metric} summary")
+            lines.append(f'{metric}{{quantile="0.5"}} {stats["p50_ms"]}')
+            lines.append(f'{metric}{{quantile="0.95"}} {stats["p95_ms"]}')
+            lines.append(f"{metric}_count {stats['count']}")
+        return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _prom_name(name: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name)
+    if not safe or safe[0].isdigit():
+        safe = f"m_{safe}"
+    return f"kb_ai_{safe}"
+
 
 _circuits: CircuitBreaker | None = None
 _metrics: Metrics | None = None

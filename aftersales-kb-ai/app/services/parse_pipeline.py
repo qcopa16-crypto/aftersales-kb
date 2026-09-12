@@ -28,6 +28,7 @@ def run_parse(
     unit_id: str,
     file_type: str,
     file_bytes: bytes | None = None,
+    file_path: str | None = None,
     file_name: str | None = None,
     markdown: str | None = None,
     source_url: str | None = None,
@@ -39,8 +40,12 @@ def run_parse(
     mineru: MinerUClient,
     vlm: VlmClient,
     progress: ProgressFn | None = None,
+    ingest_id: str | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> ParseResponse:
     """Run LangGraph ingest and map state → ParseResponse."""
+    from app.services.fingerprint import chunks_fingerprint, content_fingerprint
+
     try:
         state = run_ingest_graph(
             cfg=cfg,
@@ -49,6 +54,7 @@ def run_parse(
             unit_id=unit_id,
             file_type=file_type,
             file_bytes=file_bytes,
+            file_path=file_path,
             file_name=file_name,
             markdown=markdown,
             source_url=source_url,
@@ -57,6 +63,7 @@ def run_parse(
             chunk_overlap=chunk_overlap,
             use_vlm=use_vlm,
             progress=progress,
+            should_cancel=should_cancel,
         )
     except IngestGraphError as exc:
         raise ParsePipelineError(str(exc), exc.error_code, exc.status) from exc
@@ -64,17 +71,19 @@ def run_parse(
     raw_chunks = state.get("chunks") or []
     raw_images = state.get("images") or []
     q = state.get("quality") or {}
+    text = state.get("text") or ""
+    chunk_models = [
+        ParseChunk(
+            chunk_index=int(c.get("chunk_index") or 0),
+            content=str(c.get("content") or ""),
+            heading_path=list(c.get("heading_path") or []),
+        )
+        for c in raw_chunks
+    ]
     return ParseResponse(
         unit_id=unit_id.strip(),
-        markdown=state.get("text") or "",
-        chunks=[
-            ParseChunk(
-                chunk_index=int(c.get("chunk_index") or 0),
-                content=str(c.get("content") or ""),
-                heading_path=list(c.get("heading_path") or []),
-            )
-            for c in raw_chunks
-        ],
+        markdown=text,
+        chunks=chunk_models,
         images=[
             ParseImage(
                 image_id=str(i.get("image_id") or ""),
@@ -88,4 +97,18 @@ def run_parse(
         file_type=file_type,
         quality=ParseQuality(**{k: q[k] for k in ParseQuality.model_fields if k in q}),
         cache_hit=False,
+        content_hash=content_fingerprint(text),
+        chunks_hash=chunks_fingerprint(
+            [
+                {
+                    "chunk_index": c.chunk_index,
+                    "content": c.content,
+                    "heading_path": c.heading_path,
+                }
+                for c in chunk_models
+            ]
+        ),
+        ingest_id=ingest_id or None,
+        suggested_category=state.get("suggested_category"),
+        permission_hint=state.get("permission_hint"),
     )

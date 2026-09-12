@@ -1,4 +1,8 @@
-"""Content-hash parse cache for idempotent re-ingest."""
+"""Content-hash parse cache for idempotent re-ingest.
+
+Cache key includes parser/embed/config versions so dependency upgrades
+automatically miss stale entries.
+"""
 
 from __future__ import annotations
 
@@ -10,8 +14,19 @@ from typing import Any
 from app.schemas.ingest import ParseResponse
 
 
-def content_hash(*, file_type: str, file_bytes: bytes | None, markdown: str | None, chunk_size: int, chunk_overlap: int, use_vlm: bool) -> str:
-    """Stable hash for parse inputs (not source_url body)."""
+def content_hash(
+    *,
+    file_type: str,
+    file_bytes: bytes | None,
+    markdown: str | None,
+    chunk_size: int,
+    chunk_overlap: int,
+    use_vlm: bool,
+    parser_version: str = "1.1",
+    embed_model: str = "",
+    config_version: str = "1",
+) -> str:
+    """Stable hash for parse inputs + dependency versions (not source_url body)."""
     h = hashlib.sha256()
     h.update(file_type.encode("utf-8"))
     h.update(b"|")
@@ -20,6 +35,12 @@ def content_hash(*, file_type: str, file_bytes: bytes | None, markdown: str | No
     h.update(str(chunk_overlap).encode())
     h.update(b"|")
     h.update(b"1" if use_vlm else b"0")
+    h.update(b"|")
+    h.update((parser_version or "").encode("utf-8"))
+    h.update(b"|")
+    h.update((embed_model or "").encode("utf-8"))
+    h.update(b"|")
+    h.update((config_version or "").encode("utf-8"))
     h.update(b"|")
     if file_bytes is not None:
         h.update(file_bytes)

@@ -3,15 +3,24 @@ from pydantic import BaseModel, Field
 
 class ChunkIn(BaseModel):
     chunk_index: int = Field(ge=0)
-    content: str = Field(min_length=1)
+    # Allow empty strings so embed quality gate can reject with 400 (not 422).
+    content: str = Field(default="")
     heading_path: list[str] = Field(default_factory=list)
 
 
 class EmbedRequest(BaseModel):
     unit_id: str = Field(min_length=1)
+    # Hard upper bound is also enforced in the endpoint via Settings.embed_max_chunks
+    # so the error body can carry EMBED_TOO_MANY_CHUNKS instead of 422.
     chunks: list[ChunkIn] = Field(min_length=1)
     # P3: resume after partial embed; default 0 = full replace
     resume_from_index: int = Field(default=0, ge=0)
+    # batch consistency (optional; validated when provided)
+    content_hash: str | None = None
+    chunks_hash: str | None = None
+    force: bool = False
+    # Java-generated audit id; Python only echoes/stores, never generates.
+    ingest_id: str | None = Field(default=None, max_length=128)
 
 
 class EmbedResponse(BaseModel):
@@ -20,6 +29,7 @@ class EmbedResponse(BaseModel):
     dim: int
     resumed_from: int = 0
     partial: bool = False
+    ingest_id: str | None = None
 
 
 class ParseChunk(BaseModel):
@@ -53,6 +63,7 @@ class ParseQuality(BaseModel):
     markdown_chars: int = 0
     page_count: int | None = None
     suggest_review: bool = False
+    # Stable enum (see app.services.quality.REVIEW_REASONS). Empty when suggest_review=false.
     review_reasons: list[str] = Field(default_factory=list)
 
 
@@ -65,6 +76,13 @@ class ParseResponse(BaseModel):
     file_type: str
     quality: ParseQuality = Field(default_factory=ParseQuality)
     cache_hit: bool = False
+    content_hash: str = ""
+    chunks_hash: str = ""
+    # Echo of request ingest_id (Java-generated); None if not provided.
+    ingest_id: str | None = None
+    # Heuristic only; Java decides whether to persist.
+    suggested_category: str | None = None
+    permission_hint: str | None = None
 
 
 class DeleteUnitResponse(BaseModel):

@@ -50,17 +50,25 @@ QA:      START → retrieve → generate → END
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | /health | 健康检查（limits / circuits / metrics） |
-| POST | /internal/parse | 同步解析（小文档） |
-| POST | /internal/parse/async | **Init** 异步解析，返回 `task_id` |
-| GET | /internal/tasks/{task_id} | **Poll** 任务进度与结果 |
+| GET | /metrics | Prometheus 文本指标 |
+| POST | /internal/parse | **生产主路径** 同步解析（Java 编排） |
+| POST | /internal/parse/async | 调试/兼容 Init 异步解析，**非生产主路径** |
+| GET | /internal/tasks/{task_id} | **Poll** 任务进度与结果（配合 async） |
 | DELETE | /internal/tasks/{task_id} | 取消任务 |
-| POST | /internal/embed | 向量化入库（支持 `resume_from_index`） |
+| POST | /internal/embed | 向量化入库（支持 `resume_from_index` / `ingest_id`） |
 | POST | /internal/retrieve | 问题 → Top-K chunks |
 | POST | /internal/generate | SSE 流式回答（仅用调用方 contexts） |
 | POST | /internal/vlm/describe | 单图 → 文字 |
 | DELETE | /internal/units/{id} | 删向量 |
 
-鉴权：`X-Internal-Token`（`/health` 除外）
+鉴权：`X-Internal-Token`（`/health` 除外；`/metrics` 默认同鉴权，`METRICS_PUBLIC=true` 时调试放行）
+
+**生产主路径**：Java Worker 负责任务态/阶段机/质检编排 → 同步 `/internal/parse` → `/internal/embed`。`/internal/parse/async` 仅调试/兼容，任务存进程内存、重启即失。
+
+**权限与进程语义（契约）**
+- **retrieve / generate 权限过滤在 Java**；Python 不实现业务权限。
+- `unit_lock` / circuit / parse_cache / embed_partial / task_store 均为 **process-local**；多副本需单写者或外置锁，否则无跨进程互斥。
+- parse 缓存键 **不含 unit_id**；`cache_hit=true` 时响应里的 `unit_id` 为本次请求回显覆盖。
 
 ## 本地启动
 
@@ -100,8 +108,9 @@ python -m pytest tests/test_langgraph_real.py -v
 | 文档 | 内容 |
 |---|---|
 | [架构设计](docs/architecture.md) | 模块、LangGraph、数据流 |
-| [内部接口](docs/ai-service-api.md) | `/internal/*` 契约 |
+| [内部接口](docs/ai-service-api.md) | `/internal/*` 契约（error_code / ingest_id / hash / 超时） |
 | [配置说明](docs/config.md) | 环境变量 |
 | [实施任务](docs/implementation.md) | 里程碑与验收 |
+| [无状态加固规格](docs/compose/spec/ingest-python-stateless-hardening.md) | 本轮 P0–P2 交付 |
 
 业务侧：`../docs/api/integration.md`、`../代码设计规范.md`、`../DESIGN.md`

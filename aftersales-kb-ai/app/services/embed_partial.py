@@ -14,6 +14,8 @@ class EmbedPartial:
     dim: int
     vectors: list[list[float]]  # aligned to chunk_index order
     contents: list[str]
+    chunks_hash: str = ""
+    embed_model: str = ""
 
 
 class EmbedPartialStore:

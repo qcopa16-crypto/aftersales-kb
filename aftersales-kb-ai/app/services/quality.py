@@ -7,6 +7,15 @@ from dataclasses import dataclass, field
 from app.config import Settings
 
 
+# Stable enum for Java branching. Do not rename without contract bump.
+REVIEW_REASONS = (
+    "product_manual_heuristic",
+    "image_count_high",
+    "empty_chunks",
+    "low_heading_coverage",
+)
+
+
 @dataclass
 class QualityReport:
     chunk_count: int = 0

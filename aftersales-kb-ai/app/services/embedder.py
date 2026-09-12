@@ -13,6 +13,20 @@ from app.config import Settings
 logger = logging.getLogger(__name__)
 
 
+class EmbedError(RuntimeError):
+    """Embedding backend failure with retry classification metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        error_code: str = "EMBED_FAILED",
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.status_code = status_code
+
+
 class Embedder(ABC):
     @property
     @abstractmethod
@@ -63,20 +77,38 @@ class CloudEmbedder(Embedder):
         if not texts:
             return []
         if not self._base or not self._key:
-            raise RuntimeError("EMBED_CLOUD_BASE / EMBED_CLOUD_KEY not configured")
-        resp = httpx.post(
-            f"{self._base}/embeddings",
-            headers={"Authorization": f"Bearer {self._key}"},
-            json={"model": self._model, "input": texts},
-            timeout=self._timeout,
-        )
-        resp.raise_for_status()
+            raise EmbedError(
+                "EMBED_CLOUD_BASE / EMBED_CLOUD_KEY not configured",
+                "EMBED_EMPTY_DOCUMENT",
+            )
+        try:
+            resp = httpx.post(
+                f"{self._base}/embeddings",
+                headers={"Authorization": f"Bearer {self._key}"},
+                json={"model": self._model, "input": texts},
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if 400 <= code < 500 and code != 429:
+                # Client faults are permanent; do not amplify with retries.
+                raise EmbedError(f"embed HTTP {code}", "EMBED_CLIENT_ERROR", status_code=code) from exc
+            # 5xx/429 become retryable via error_code/status_code classification.
+            raise EmbedError(f"embed HTTP {code}", "EMBED_FAILED", status_code=code) from exc
+        except httpx.HTTPError as exc:
+            # Timeouts / connection errors carry "timeout"/"connection" in the name → retryable.
+            raise EmbedError(f"embed request failed: {exc}", "EMBED_FAILED") from exc
         data = resp.json()["data"]
         data_sorted = sorted(data, key=lambda x: x["index"])
         vectors = [row["embedding"] for row in data_sorted]
         for i, vec in enumerate(vectors):
             if len(vec) != self._dim:
-                raise RuntimeError(f"embedding dim mismatch at {i}: got {len(vec)}, expect {self._dim}")
+                # Permanent payload mismatch — never retry.
+                raise EmbedError(
+                    f"embedding dim mismatch at {i}: got {len(vec)}, expect {self._dim}",
+                    "EMBED_DIM_MISMATCH",
+                )
         return vectors
 
 

@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     max_source_bytes: int = 209_715_200  # 200MB
     source_connect_timeout_sec: float = 10.0
     source_read_timeout_sec: float = 180.0
+    # Test-only: allow localhost/private hosts so local fault-injection servers work.
+    source_allow_private_hosts: bool = False
 
     # parse quality heuristics
     qc_pdf_page_review: int = 20
@@ -99,6 +101,35 @@ class Settings(BaseSettings):
     embed_resume_enabled: bool = True
     embed_partial_max: int = 32
 
+    # Known-issues hardening (Python)
+    parse_queue_max: int = 32
+    embed_max_empty_ratio: float = 0.5
+    embed_max_content_chars: int = 60000
+    source_max_redirects: int = 5
+    max_upload_bytes: int = 209_715_200
+    upload_spool_threshold: int = 8_388_608
+    mineru_batch_store_path: str = ".data/mineru_batches.json"
+
+    # P1/P2 upgrade: versions, lease, cache key, parse hard-fail
+    parser_version: str = "1.1"
+    cache_config_version: str = "1"
+    task_lease_sec: float = 120.0
+    task_reap_on_read: bool = True
+    parse_fail_on_empty: bool = True
+
+    # Stateless hardening: sync parse overall budget (0 = disabled).
+    # Stage timeouts remain source_*/mineru_poll_*/vlm_*; this is a request wall-clock cap.
+    parse_overall_timeout_sec: float = 900.0
+
+    # Input hardening (P0-P2)
+    embed_max_chunks: int = 5000
+    max_markdown_chars: int = 200_000
+    generate_max_question_chars: int = 2000
+    generate_max_contexts_total_chars: int = 120_000
+    error_message_max_chars: int = 500
+    metrics_public: bool = False
+    refuse_on_default_internal_token: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -106,3 +137,13 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def embed_model_id(cfg: Settings | None = None) -> str:
+    c = cfg or get_settings()
+    provider = (c.embed_provider or "fake").lower()
+    if provider == "cloud":
+        return f"cloud:{c.embed_cloud_model}"
+    if provider == "local":
+        return f"local:{c.embed_local_model}"
+    return provider

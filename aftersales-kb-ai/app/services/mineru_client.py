@@ -2,23 +2,39 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import time
 import zipfile
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
 from app.config import Settings, get_settings
+from app.services.mineru_batch_store import get_mineru_batch_store
 from app.utils.circuit import get_circuits, get_metrics
 from app.utils.limits import get_limits
+from app.utils.retry import RetryPolicy, retry_call
 
 logger = logging.getLogger(__name__)
 
 # extract-result states
 _DONE = {"done", "success", "completed"}
 _FAILED = {"failed", "error", "cancelled"}
+
+# (stage, progress_0_100, detail) — used by async worker / Java-visible logs.
+ProgressFn = Callable[[str, int, str], None]
+CancelFn = Callable[[], bool]
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 class MinerUError(RuntimeError):
@@ -41,7 +57,13 @@ class MinerUClient:
             "Content-Type": "application/json",
         }
 
-    def pdf_to_markdown(self, pdf_path: Path) -> tuple[str, int | None, list[dict]]:
+    def pdf_to_markdown(
+        self,
+        pdf_path: Path,
+        *,
+        on_progress: ProgressFn | None = None,
+        should_cancel: CancelFn | None = None,
+    ) -> tuple[str, int | None, list[dict]]:
         """Return (markdown, page_count, images_meta). Images listed but not VLM-described."""
         cfg_live = get_settings()
         circuits = get_circuits(cfg_live.circuit_failure_threshold, cfg_live.circuit_cooldown_sec)
@@ -49,6 +71,8 @@ class MinerUClient:
         if circuits.is_open("mineru"):
             metrics.inc("mineru.circuit_open")
             raise MinerUError("MinerU circuit open (cooldown)", "MINERU_CIRCUIT_OPEN")
+        if should_cancel and should_cancel():
+            raise MinerUError("task cancelled before MinerU submit", "TASK_CANCELLED")
 
         if not self._cfg.mineru_enabled:
             raise MinerUError("MinerU disabled by MINERU_ENABLED=false", "MINERU_DISABLED")
@@ -58,32 +82,75 @@ class MinerUClient:
             raise MinerUError(f"pdf not found or empty: {pdf_path}", "MINERU_BAD_FILE")
 
         limits = get_limits()
-        if not limits.try_consume_mineru_file(1):
-            raise MinerUError(
-                f"MinerU daily file quota exceeded ({limits.mineru_daily_file_limit})",
-                "MINERU_DAILY_QUOTA",
-            )
+        batch_store = get_mineru_batch_store(cfg_live.mineru_batch_store_path)
+        file_hash = _file_sha256(pdf_path)
+        existing_batch = batch_store.get_batch_id(file_hash)
 
         t0 = time.monotonic()
         try:
+            if existing_batch:
+                # Resume poll on a previously submitted batch; do not re-consume daily quota.
+                logger.info("MinerU resume batch_id=%s file=%s", existing_batch, pdf_path.name)
+                metrics.inc("mineru.resume")
+                try:
+                    result = self._poll_result(
+                        existing_batch, on_progress=on_progress, should_cancel=should_cancel
+                    )
+                    out = self._parse_result(result)
+                    batch_store.clear(file_hash)
+                    circuits.record_success("mineru")
+                    metrics.inc("mineru.ok")
+                    metrics.observe_ms("mineru", (time.monotonic() - t0) * 1000)
+                    return out
+                except MinerUError as exc:
+                    if exc.error_code in {"MINERU_TIMEOUT", "TASK_CANCELLED"}:
+                        # Keep batch_id for the next attempt (cancel/timeout are not terminal).
+                        raise
+                    batch_store.clear(file_hash)
+                    raise
+
+            if not limits.try_consume_mineru_file(1):
+                raise MinerUError(
+                    f"MinerU daily file quota exceeded ({limits.mineru_daily_file_limit})",
+                    "MINERU_DAILY_QUOTA",
+                )
+
             # submit: process concurrency + 50 files/min vendor limit
             try:
                 with limits.mineru_submit_slot(timeout=90.0):
-                    batch_id, upload_url = self._create_upload(pdf_path.name)
-                    self._upload_file(upload_url, pdf_path)
+                    batch_id, upload_url = retry_call(
+                        self._create_upload,
+                        pdf_path.name,
+                        policy=RetryPolicy(max_attempts=3, base_delay_sec=0.5, max_delay_sec=8.0),
+                    )
+                    retry_call(
+                        self._upload_file,
+                        upload_url,
+                        pdf_path,
+                        policy=RetryPolicy(max_attempts=2, base_delay_sec=0.5, max_delay_sec=4.0),
+                    )
             except TimeoutError as exc:
                 raise MinerUError("MinerU submit rate limit timeout", "MINERU_RATE_LIMIT") from exc
 
-            result = self._poll_result(batch_id)
+            batch_store.put(file_hash, batch_id, file_name=pdf_path.name)
+            result = self._poll_result(batch_id, on_progress=on_progress, should_cancel=should_cancel)
             out = self._parse_result(result)
+            batch_store.clear(file_hash)
             circuits.record_success("mineru")
             metrics.inc("mineru.ok")
             metrics.observe_ms("mineru", (time.monotonic() - t0) * 1000)
             return out
         except MinerUError as exc:
-            if exc.error_code != "MINERU_DAILY_QUOTA":
+            # Cancel/timeout are not dependency health signals; do not trip circuit.
+            if exc.error_code not in {
+                "MINERU_DAILY_QUOTA",
+                "TASK_CANCELLED",
+                "MINERU_TIMEOUT",
+                "MINERU_CIRCUIT_OPEN",
+            }:
                 circuits.record_failure("mineru", str(exc))
-            metrics.inc("mineru.fail")
+            if exc.error_code != "TASK_CANCELLED":
+                metrics.inc("mineru.fail")
             raise
 
     def _create_upload(self, file_name: str) -> tuple[str, str]:
@@ -132,12 +199,21 @@ class MinerUClient:
         except httpx.HTTPError as exc:
             raise MinerUError(f"MinerU file upload failed: {exc}", "MINERU_UPLOAD_FAILED") from exc
 
-    def _poll_result(self, batch_id: str) -> dict:
+    def _poll_result(
+        self,
+        batch_id: str,
+        *,
+        on_progress: ProgressFn | None = None,
+        should_cancel: CancelFn | None = None,
+    ) -> dict:
         deadline = time.monotonic() + self._cfg.mineru_poll_timeout_sec
         interval = max(0.5, self._cfg.mineru_poll_interval_sec)
         last_state = ""
+        last_pages: tuple[int | None, int | None] = (None, None)
 
         while time.monotonic() < deadline:
+            if should_cancel and should_cancel():
+                raise MinerUError("MinerU poll cancelled", "TASK_CANCELLED")
             try:
                 with get_limits().mineru_poll_slot(timeout=15.0):
                     resp = httpx.get(
@@ -164,16 +240,30 @@ class MinerUClient:
 
             item = extract_result[0]
             state = (item.get("state") or "").lower()
-            if state != last_state:
-                prog = item.get("extract_progress") or {}
+            prog = item.get("extract_progress") or {}
+            extracted = prog.get("extracted_pages")
+            total = prog.get("total_pages")
+            if state != last_state or (extracted, total) != last_pages:
                 logger.info(
                     "MinerU batch=%s state=%s pages=%s/%s",
                     batch_id,
                     state,
-                    prog.get("extracted_pages"),
-                    prog.get("total_pages"),
+                    extracted,
+                    total,
                 )
                 last_state = state
+                last_pages = (extracted, total)
+                if on_progress is not None:
+                    try:
+                        pct = 20
+                        if isinstance(total, int) and total > 0 and isinstance(extracted, int):
+                            pct = 20 + int(20 * min(1.0, extracted / total))
+                        on_progress("parse", pct, f"mineru {state} pages={extracted}/{total}")
+                    except Exception as exc:
+                        # Async worker progress raises TASK_CANCELLED; normalize for graph mapping.
+                        if getattr(exc, "error_code", None) == "TASK_CANCELLED":
+                            raise MinerUError(str(exc), "TASK_CANCELLED") from exc
+                        raise
 
             if state in _DONE:
                 return item
