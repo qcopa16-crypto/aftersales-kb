@@ -1,7 +1,7 @@
 import time
 
-from app.config import Settings
-from app.utils.limits import Limits, RateLimiter
+from core.config import Settings
+from core.limits import Limits, RateLimiter
 
 
 def test_rate_limiter_allows_within_window():

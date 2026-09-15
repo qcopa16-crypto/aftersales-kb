@@ -41,7 +41,7 @@ os.environ["VLM_API_KEY"] = env.get("VLM_API_KEY", env.get("LLM_API_KEY", ""))
 os.environ["VLM_MODEL"] = env.get("VLM_MODEL", "glm-4.6v")
 os.environ["MAX_VLM_IMAGES"] = "6"
 
-from app.config import get_settings  # noqa: E402
+from core.config import get_settings  # noqa: E402
 
 get_settings.cache_clear()
 cfg = get_settings()

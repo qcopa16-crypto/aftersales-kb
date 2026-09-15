@@ -1,4 +1,4 @@
-from app.services.chunker import split_markdown
+from ai.ingest.chunker import split_markdown
 
 
 def test_table_kept_atomic_when_fits():

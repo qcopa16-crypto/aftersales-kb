@@ -2,16 +2,11 @@
 
 import os
 
-os.environ.setdefault("VECTOR_STORE", "memory")
-os.environ.setdefault("EMBED_PROVIDER", "fake")
-os.environ.setdefault("EMBED_DIM", "32")
-os.environ.setdefault("INTERNAL_TOKEN", "test-token")
-os.environ.setdefault("MINERU_ENABLED", "false")
 os.environ.setdefault("EMBED_RESUME_ENABLED", "true")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.config import get_settings  # noqa: E402
+from core.config import get_settings  # noqa: E402
 
 get_settings.cache_clear()
 
@@ -59,7 +54,7 @@ def test_embed_full_then_resume_without_partial_400():
 
 
 def test_embed_resume_after_partial_checkpoint():
-    from app.services.embed_partial import EmbedPartial, get_embed_partial_store
+    from ai.embed.partial import EmbedPartial, get_embed_partial_store
 
     chunks = [{"chunk_index": i, "content": f"body{i}"} for i in range(3)]
     # simulate checkpoint after 1 chunk encoded

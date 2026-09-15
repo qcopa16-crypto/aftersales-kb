@@ -51,7 +51,7 @@ os.environ["LLM_API_KEY"] = env.get("LLM_API_KEY", "")
 os.environ["LLM_MODEL"] = env.get("LLM_MODEL", "glm-4.5-air")
 os.environ["MAX_VLM_IMAGES"] = "4"
 
-from app.config import get_settings  # noqa: E402
+from core.config import get_settings  # noqa: E402
 
 get_settings.cache_clear()
 
@@ -65,10 +65,10 @@ get_llm.cache_clear()
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.graphs.ingest_graph import build_ingest_graph, run_ingest_graph  # noqa: E402
-from app.graphs.qa_graph import run_qa_graph  # noqa: E402
+from ai.graphs.ingest_graph import build_ingest_graph, run_ingest_graph  # noqa: E402
+from ai.graphs.qa_graph import run_qa_graph  # noqa: E402
 from app.main import app  # noqa: E402
-from app.services.parse_pipeline import run_parse  # noqa: E402
+from ai.ingest.parse import run_parse  # noqa: E402
 
 client = TestClient(app)
 HEADERS = {"X-Internal-Token": os.environ["INTERNAL_TOKEN"]}

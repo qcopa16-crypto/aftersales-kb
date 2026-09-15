@@ -1,5 +1,5 @@
-from app.services.content_cache import ParseResultCache, content_hash
-from app.utils.vlm_cache import CaptionCache
+from ai.ingest.content_cache import ParseResultCache, content_hash
+from ai.generate.vlm_cache import CaptionCache
 
 
 def test_content_hash_stable():

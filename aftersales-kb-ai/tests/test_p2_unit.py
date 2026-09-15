@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from app.config import Settings
-from app.services.chunker import enrich_chunk_for_embed, split_markdown
-from app.services.source_fetch import SourceFetchError, _validate_url
+from core.config import Settings
+from ai.ingest.chunker import enrich_chunk_for_embed, split_markdown
+from ai.ingest.source import SourceFetchError, _validate_url
 
 
 def test_validate_url_blocks_loopback():

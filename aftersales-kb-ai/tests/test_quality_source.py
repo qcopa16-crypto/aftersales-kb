@@ -1,14 +1,9 @@
 import os
 
-os.environ.setdefault("VECTOR_STORE", "memory")
-os.environ.setdefault("EMBED_PROVIDER", "fake")
-os.environ.setdefault("EMBED_DIM", "32")
-os.environ.setdefault("INTERNAL_TOKEN", "test-token")
-os.environ.setdefault("MINERU_ENABLED", "false")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.config import Settings, get_settings  # noqa: E402
+from core.config import Settings, get_settings  # noqa: E402
 
 get_settings.cache_clear()
 
@@ -19,7 +14,7 @@ get_vector_store.cache_clear()
 get_mineru.cache_clear()
 
 from app.main import app  # noqa: E402
-from app.services.quality import build_quality  # noqa: E402
+from ai.ingest.quality import build_quality  # noqa: E402
 
 client = TestClient(app)
 HEADERS = {"X-Internal-Token": "test-token"}

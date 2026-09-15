@@ -16,27 +16,37 @@
 ```text
 aftersales-kb/
 ├── src/main/java/com/shuidun/kb/     # Java Spring Boot（业务编排 / 权限 / 主数据）
-├── src/main/resources/               # application.yaml 等
 ├── docs/
 │   ├── api/                          # 对前端接口、Java↔AI 集成契约
-│   ├── services/                     # 架构、领域、功能、库表、路线
-│   ├── demo-knowledge/               # 演示知识（sop/policy/sales/md；product PDF 本地保留不入库）
-│   └── compose/spec/                 # 特性规格文档
+│   ├── services/                     # 系统架构、领域、功能、库表、路线
+│   └── demo-knowledge/               # 演示知识语料
 ├── aftersales-kb-ai/                 # FastAPI AI 服务（独立 Python 工程）
-│   ├── app/
-│   │   ├── api/                      # 路由（health / internal）
-│   │   ├── services/                 # 解析、Embedding、检索、LLM/VLM
-│   │   ├── utils/                    # 熔断、限流、缓存、格式转换
-│   │   ├── graphs/                   # LangGraph ingest / qa
-│   │   └── schemas/                  # Pydantic 契约
-│   ├── tests/                        # 单元 + 真实链路测试
-│   ├── scripts/                      # 验收 / 冒烟脚本
-│   ├── main.py                       # uvicorn 入口
-│   └── requirements.txt
+│   ├── app/                          # HTTP 薄层（api/internal 按域拆分）
+│   ├── ai/                           # 领域：ingest / retrieve / generate / embed / graphs
+│   ├── schemas/                      # DTO 契约（app 与 ai 共用）
+│   ├── core/                         # 配置、错误码、熔断、trace 等横切
+│   ├── tests/                        # 离线回归 + 架构门禁
+│   ├── scripts/                      # 真实验收 / 运维 / bench
+│   └── requirements.txt + requirements.lock.txt
 ├── 代码设计规范.md                    # AI 代码生成契约（优先级高）
-├── DESIGN.md                         # 入库流水线 Taste/流程规范
+├── DESIGN.md                         # 入库流水线产品/流程规范
 └── pom.xml
 ```
+
+AI 服务细节见 `aftersales-kb-ai/README.md` 与 `aftersales-kb-ai/docs/`。
+
+## 文档导航
+
+| 文档 | 内容 |
+|---|---|
+| [代码设计规范.md](代码设计规范.md) | AI 代码生成契约（最高优先级） |
+| [DESIGN.md](DESIGN.md) | 入库流水线产品/流程规范 |
+| [docs/services/kb-design-spec.md](docs/services/kb-design-spec.md) | 领域模型、权限、状态机 |
+| [docs/services/architecture.md](docs/services/architecture.md) | **系统**总体架构（Java+AI） |
+| [docs/api/api.md](docs/api/api.md) / [integration.md](docs/api/integration.md) | 对前端 API / Java↔AI 契约 |
+| [aftersales-kb-ai/docs/architecture.md](aftersales-kb-ai/docs/architecture.md) | **AI 服务**架构与硬约束 |
+| [aftersales-kb-ai/docs/ai-service-api.md](aftersales-kb-ai/docs/ai-service-api.md) | `/internal/*` 契约 |
+| [aftersales-kb-ai/docs/config.md](aftersales-kb-ai/docs/config.md) | 环境变量 |
 
 ## 核心能力
 

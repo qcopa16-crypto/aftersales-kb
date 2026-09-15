@@ -49,7 +49,7 @@ else:
     os.environ["EMBED_DIM"] = "2048"
 os.environ["EMBED_BATCH_SIZE"] = "4"
 
-from app.config import get_settings  # noqa: E402
+from core.config import get_settings  # noqa: E402
 
 get_settings.cache_clear()
 cfg = get_settings()
@@ -67,9 +67,9 @@ def mark(name: str, ok: bool, detail: str) -> None:
 
 def main() -> int:
     from app.deps import get_embedder, get_mineru, get_vector_store
-    from app.services.chunker import split_markdown
-    from app.utils.docx_parser import docx_to_markdown
-    from app.services.vector_store import VectorItem
+    from ai.ingest.chunker import split_markdown
+    from ai.ingest.docx_parser import docx_to_markdown
+    from ai.retrieve.store import VectorItem
 
     # 1) vector store real Milvus
     try:

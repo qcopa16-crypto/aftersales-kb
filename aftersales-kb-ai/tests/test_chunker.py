@@ -1,4 +1,4 @@
-from app.services.chunker import split_markdown
+from ai.ingest.chunker import split_markdown
 
 
 def test_split_by_headings_and_index():

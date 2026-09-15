@@ -5,9 +5,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 
-from app.config import get_settings
+from core.config import get_settings
 from app.api import health, internal
-from app.utils.trace import get_trace_id, install_trace_logging, new_trace_id, set_trace_id
+from core.trace import get_trace_id, install_trace_logging, new_trace_id, set_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +29,41 @@ def _warn_if_weak_token(cfg) -> None:
             )
 
 
+def _enforce_strict_prod(cfg) -> None:
+    """Fail-closed production gate: retrieve_strict_prod requires RETRIEVE_REQUIRE_ACL=true."""
+    if not cfg.retrieve_strict_prod:
+        return
+    if not cfg.retrieve_require_acl:
+        raise RuntimeError(
+            "retrieve_strict_prod=true requires retrieve_require_acl=true "
+            "(set RETRIEVE_REQUIRE_ACL=true in production)"
+        )
+
+
+def _warn_multi_replica(cfg) -> None:
+    """Process-local lexical/active map are single-writer; multi-replica needs explicit mode."""
+    if (cfg.vector_store or "").lower() != "milvus":
+        return
+    if cfg.retrieve_multi_replica_safe:
+        logger.info(
+            "RETRIEVE_MULTI_REPLICA_SAFE=true: lexical path disabled; dense-only + ACL post-filter"
+        )
+        return
+    logger.warning(
+        "lexical index + milvus active map are process-local single-writer; "
+        "deploy as single-writer or accept cross-replica drift. "
+        "Set RETRIEVE_MULTI_REPLICA_SAFE=true for multi-replica dense-only mode."
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     install_trace_logging()
     cfg = get_settings()
     _warn_if_weak_token(cfg)
+    _enforce_strict_prod(cfg)
+    _warn_multi_replica(cfg)
     # warm vector store collection
     from app.deps import get_vector_store
 

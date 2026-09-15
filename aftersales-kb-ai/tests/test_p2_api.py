@@ -3,15 +3,10 @@
 import os
 import time
 
-os.environ.setdefault("VECTOR_STORE", "memory")
-os.environ.setdefault("EMBED_PROVIDER", "fake")
-os.environ.setdefault("EMBED_DIM", "32")
-os.environ.setdefault("INTERNAL_TOKEN", "test-token")
-os.environ.setdefault("MINERU_ENABLED", "false")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.config import get_settings  # noqa: E402
+from core.config import get_settings  # noqa: E402
 
 get_settings.cache_clear()
 

@@ -2,8 +2,8 @@
 
 import time
 
-from app.utils.circuit import CircuitBreaker, Metrics
-from app.services.embed_partial import EmbedPartial, get_embed_partial_store
+from core.circuit import CircuitBreaker, Metrics
+from ai.embed.partial import EmbedPartial, get_embed_partial_store
 
 
 def test_circuit_opens_after_threshold():

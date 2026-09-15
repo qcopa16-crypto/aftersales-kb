@@ -3,9 +3,9 @@ import hmac
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from app.config import get_settings
-from app.utils.circuit import get_circuits, get_metrics
-from app.utils.limits import get_limits
+from core.config import get_settings
+from core.circuit import get_circuits, get_metrics
+from core.limits import get_limits
 
 router = APIRouter(tags=["health"])
 
