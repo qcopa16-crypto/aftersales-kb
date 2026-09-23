@@ -168,7 +168,10 @@ def build_retrieve_graph(
         if hybrid_on:
             lexical_ranking = [upsert(r, "lexical", float(r.get("score") or 0.0)) for r in lexical_hits]
         rankings = [dense_ranking] + ([lexical_ranking] if hybrid_on else [])
-        scores = fuse_rrf(rankings, k=settings.retrieve_hybrid_rrf_k)
+        weights = [1.0]
+        if len(rankings) > 1:
+            weights.append(float(getattr(settings, "retrieve_lexical_rrf_weight", 0.35) or 0.35))
+        scores = fuse_rrf(rankings, k=settings.retrieve_hybrid_rrf_k, weights=weights)
         fused_list = []
         for key, hit in by_key.items():
             hit.score_fused = scores.get(key, 0.0)

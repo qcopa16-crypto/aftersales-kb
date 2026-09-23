@@ -111,4 +111,5 @@ def run_parse(
         ingest_id=ingest_id or None,
         suggested_category=state.get("suggested_category"),
         permission_hint=state.get("permission_hint"),
+        stage_timings=dict(state.get("stage_timings") or {}),
     )

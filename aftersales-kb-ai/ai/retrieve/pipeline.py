@@ -400,13 +400,19 @@ def build_acl_filter(
 def fuse_rrf(
     path_rankings: list[list[str]],
     k: int = 60,
+    weights: list[float] | None = None,
 ) -> dict[str, float]:
-    """score_fused = sum 1/(k+rank); missing path contributes nothing. Rank starts at 1."""
+    """score_fused = sum w_i/(k+rank); missing path contributes nothing. Rank starts at 1."""
     k = max(1, int(k))
     scores: dict[str, float] = {}
-    for ranking in path_rankings:
+    for i, ranking in enumerate(path_rankings):
+        w = 1.0
+        if weights is not None and i < len(weights):
+            w = float(weights[i])
+        if w == 0.0:
+            continue
         for rank, key in enumerate(ranking, start=1):
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            scores[key] = scores.get(key, 0.0) + w * 1.0 / (k + rank)
     return scores
 
 
@@ -459,20 +465,105 @@ def apply_max_per_unit(hits: list[FuseHit], max_per_unit: int) -> list[FuseHit]:
     return out
 
 
+def unit_representative_order(hits: list[FuseHit]) -> list[FuseHit]:
+    """Debias multi-chunk manuals: rank units by best chunk, interleave next-best after reps."""
+    best_by_unit: dict[str, FuseHit] = {}
+    rest_by_unit: dict[str, list[FuseHit]] = {}
+    for h in hits:
+        cur = best_by_unit.get(h.unit_id)
+        if cur is None or h.score_fused > cur.score_fused:
+            if cur is not None:
+                rest_by_unit.setdefault(h.unit_id, []).append(cur)
+            best_by_unit[h.unit_id] = h
+        else:
+            rest_by_unit.setdefault(h.unit_id, []).append(h)
+    reps = sorted(best_by_unit.values(), key=lambda x: x.score_fused, reverse=True)
+    out: list[FuseHit] = []
+    # Pass 1: one representative per unit (unit order).
+    out.extend(reps)
+    # Pass 2: next-best chunks in same unit order (consumed by max_per_unit later).
+    for rep in reps:
+        extras = sorted(
+            rest_by_unit.get(rep.unit_id, []),
+            key=lambda x: x.score_fused,
+            reverse=True,
+        )
+        out.extend(extras)
+    return out
+
+
+_ASCII_TOKEN_RE = re.compile(r"[A-Za-z]+(?:-?\d+)+|\d+(?:\.\d+)?|[A-Za-z]{2,}\d+")
+
+
+def extract_exact_tokens(question: str) -> set[str]:
+    """Error codes / model numbers / prices: E-05, LA2608, 300, 800."""
+    return {m.group(0).upper() for m in _ASCII_TOKEN_RE.finditer(question or "")}
+
+
 def rule_rerank(hits: list[FuseHit], question: str) -> list[FuseHit]:
-    """Lightweight lexical-overlap boost on fused score. No model dependency."""
-    q_terms = set()
+    """Exact-token + bigram boost on fused score. No model dependency."""
     from ai.retrieve.lexical import tokenize
 
-    q_terms.update(tokenize(question))
-    if not q_terms:
+    q_terms = set(tokenize(question))
+    exact = extract_exact_tokens(question)
+    bigrams = {t for t in q_terms if len(t) == 2 and not t.isascii()}
+    if not q_terms and not exact:
         return hits
 
     def boost(h: FuseHit) -> float:
-        overlap = len(q_terms & set(tokenize(h.content[:500])))
-        return h.score_fused + min(overlap, 10) * 1e-4
+        text = h.content[:800]
+        up = text.upper()
+        score = h.score_fused
+        for tok in exact:
+            if tok and tok in up:
+                score += 0.02
+        if bigrams:
+            content_bi = {t for t in tokenize(text) if len(t) == 2 and not t.isascii()}
+            score += 0.002 * len(bigrams & content_bi)
+        overlap = len(q_terms & set(tokenize(text)))
+        score += min(overlap, 10) * 1e-4
+        return score
 
     return sorted(hits, key=boost, reverse=True)
+
+
+def embed_rerank(
+    hits: list[FuseHit],
+    *,
+    question_vec: list[float],
+    embedder: Any,
+    top_n: int = 20,
+    weight: float = 0.35,
+) -> list[FuseHit]:
+    """Blend cosine(q, chunk) into score_fused for first top_n hits."""
+    if not hits or weight <= 0 or not question_vec:
+        return hits
+    n = max(1, int(top_n))
+    head, tail = hits[:n], hits[n:]
+    texts = [(h.content or "")[:512] for h in head]
+    try:
+        vecs = embedder.encode(texts)
+    except Exception:
+        logger.warning("embed_rerank encode failed; keep fused order", exc_info=True)
+        return hits
+    q = question_vec
+    qn = sum(x * x for x in q) ** 0.5 or 1.0
+
+    def cos(a: list[float], b: list[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        an = sum(x * x for x in a) ** 0.5 or 1.0
+        bn = sum(x * x for x in b) ** 0.5 or 1.0
+        return dot / (an * bn)
+
+    scored = []
+    for h, v in zip(head, vecs):
+        c = cos(q, list(v))
+        h.score_fused = h.score_fused + weight * max(0.0, c)
+        scored.append(h)
+    scored.sort(key=lambda x: x.score_fused, reverse=True)
+    return scored + tail
 
 
 def pack_response(hits: list[FuseHit], top_k: int) -> list[dict]:
@@ -674,24 +765,53 @@ def _run_retrieve_pipeline_inner(
         raise RetrieveError("embed circuit open", "EMBED_CIRCUIT_OPEN", 503)
     embed_t0 = time.monotonic()
     try:
-        qvec = _encode_question_cached(
-            question=question,
-            embedder=embedder,
-            cfg=cfg,
-            metrics=metrics,
-        )
+        query_texts = [question]
+        if getattr(cfg, "retrieve_query_expand", True):
+            try:
+                from ai.retrieve.query_expand import expand_query_texts
+
+                query_texts = expand_query_texts(question)
+                if len(query_texts) > 1:
+                    metrics.inc("retrieve.query_expanded")
+            except Exception:
+                query_texts = [question]
+        merged: dict[str, dict] = {}
+        store_ms = 0.0
+        for qi, qtext in enumerate(query_texts):
+            qvec = _encode_question_cached(
+                question=qtext,
+                embedder=embedder,
+                cfg=cfg,
+                metrics=metrics,
+            )
+            _check_budget("dense_search")
+            hits_i, sm_i = _search_store_with_resilience(
+                store=store,
+                qvec=qvec,
+                top_k=overfetch,
+                flt=flt,
+                cfg=cfg,
+                circuits=circuits,
+                metrics=metrics,
+            )
+            store_ms += sm_i
+            for row in hits_i:
+                key = _hit_key(
+                    str(row.get("unit_id") or ""),
+                    str(row.get("id") or ""),
+                    str(row.get("version_id") or ""),
+                )
+                prev = merged.get(key)
+                if prev is None or float(row.get("score") or 0) > float(prev.get("score") or 0):
+                    merged[key] = row
+            if qi == 0:
+                stage_embed_ms = (time.monotonic() - embed_t0) * 1000
+        dense_hits = sorted(merged.values(), key=lambda r: float(r.get("score") or 0), reverse=True)[
+            : max(1, overfetch)
+        ]
+        stage_store_ms = store_ms
         stage_embed_ms = (time.monotonic() - embed_t0) * 1000
         metrics.observe_ms("retrieve.stage_embed_ms", stage_embed_ms)
-        _check_budget("dense_search")
-        dense_hits, stage_store_ms = _search_store_with_resilience(
-            store=store,
-            qvec=qvec,
-            top_k=overfetch,
-            flt=flt,
-            cfg=cfg,
-            circuits=circuits,
-            metrics=metrics,
-        )
         metrics.observe_ms("retrieve.stage_store_ms", stage_store_ms)
         circuits.record_success("embed")
     except RetrieveError:
@@ -713,7 +833,7 @@ def _run_retrieve_pipeline_inner(
         try:
             if force_lexical_error is not None:
                 force_lexical_error()
-            sync_limit = int(cfg.retrieve_lexical_max_docs or 0) or None
+            sync_limit = int(getattr(cfg, "retrieve_lexical_sync_limit", 0) or 0) or None
             if lexical.doc_count() == 0:
                 sync_timeout = float(cfg.retrieve_lexical_sync_timeout_sec or 0)
                 if sync_timeout <= 0:
@@ -728,6 +848,14 @@ def _run_retrieve_pipeline_inner(
                     metrics=metrics,
                 )
             max_docs = int(cfg.retrieve_lexical_max_docs or 0) or None
+            lex_q = question
+            if getattr(cfg, "retrieve_query_expand", True):
+                try:
+                    from ai.retrieve.query_expand import expand_terms_for_lexical
+
+                    lex_q = expand_terms_for_lexical(question)
+                except Exception:
+                    lex_q = question
             doc_n = lexical.doc_count()
             if max_docs and doc_n > max_docs:
                 metrics.inc("retrieve.lexical_capped")
@@ -738,7 +866,7 @@ def _run_retrieve_pipeline_inner(
                     lexical_hits = []
                 else:
                     lexical_hits = lexical.search(
-                        question,
+                        lex_q,
                         top_k=overfetch,
                         filter=flt,
                         max_docs=max_docs,
@@ -746,7 +874,7 @@ def _run_retrieve_pipeline_inner(
                     metrics.inc("retrieve.lexical_hits", len(lexical_hits))
             else:
                 lexical_hits = lexical.search(
-                    question,
+                    lex_q,
                     top_k=overfetch,
                     filter=flt,
                     max_docs=max_docs,
@@ -820,9 +948,11 @@ def _run_retrieve_pipeline_inner(
             lexical_ranking.append(key)
 
     rankings = [dense_ranking]
+    weights = [1.0]
     if use_lexical:
         rankings.append(lexical_ranking)
-    fused_scores = fuse_rrf(rankings, k=cfg.retrieve_hybrid_rrf_k)
+        weights.append(float(getattr(cfg, "retrieve_lexical_rrf_weight", 0.35) or 0.35))
+    fused_scores = fuse_rrf(rankings, k=cfg.retrieve_hybrid_rrf_k, weights=weights)
     for key, hit in by_key.items():
         hit.score_fused = fused_scores.get(key, 0.0)
 
@@ -841,10 +971,30 @@ def _run_retrieve_pipeline_inner(
         metrics.inc("retrieve.filtered_out", filtered_out)
 
     # quality
+    if getattr(cfg, "retrieve_unit_agg", True):
+        fused_list = unit_representative_order(fused_list)
     fused_list = apply_max_per_unit(fused_list, cfg.retrieve_max_per_unit)
     if enable_rerank:
         fused_list = rule_rerank(fused_list, question)
+        if getattr(cfg, "retrieve_unit_agg", True):
+            fused_list = unit_representative_order(fused_list)
         fused_list = apply_max_per_unit(fused_list, cfg.retrieve_max_per_unit)
+    if getattr(cfg, "retrieve_embed_rerank", False):
+        try:
+            qvec = _encode_question_cached(
+                question=question, embedder=embedder, cfg=cfg, metrics=metrics
+            )
+            fused_list = embed_rerank(
+                fused_list,
+                question_vec=qvec,
+                embedder=embedder,
+                top_n=int(getattr(cfg, "retrieve_embed_rerank_top", 20) or 20),
+                weight=float(getattr(cfg, "retrieve_embed_rerank_weight", 0.35) or 0.35),
+            )
+            fused_list = apply_max_per_unit(fused_list, cfg.retrieve_max_per_unit)
+            metrics.inc("retrieve.embed_rerank_applied")
+        except Exception:
+            logger.warning("embed_rerank skipped", exc_info=True)
 
     chunks = pack_response(fused_list, top_k)
     stage_fuse_ms = (time.monotonic() - fuse_t0) * 1000

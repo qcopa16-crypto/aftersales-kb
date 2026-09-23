@@ -36,6 +36,8 @@ class IngestState(TypedDict, total=False):
     stage: Annotated[str, _last]
     error_code: Annotated[str | None, _last]
     error_message: Annotated[str | None, _last]
+    # Wall-clock stage timings in ms (extract_ms / vlm_ms / chunk_ms). Merged per node.
+    stage_timings: Annotated[dict[str, float], _last]
 
 
 class RetrieveState(TypedDict, total=False):

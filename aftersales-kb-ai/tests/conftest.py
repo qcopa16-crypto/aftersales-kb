@@ -16,6 +16,11 @@ os.environ.setdefault("EMBED_DIM", "32")
 os.environ.setdefault("INTERNAL_TOKEN", "test-token")
 os.environ.setdefault("MINERU_ENABLED", "false")
 os.environ.setdefault("PARSE_FAIL_ON_EMPTY", "true")
+# Offline tests must not hit developer disk caches from real eval runs.
+os.environ.setdefault("PARSE_CACHE_DISK_ENABLED", "false")
+os.environ.setdefault("MINERU_EXTRACT_CACHE_ENABLED", "false")
+# Embed rerank adds extra encode() calls; keep cache-count tests deterministic.
+os.environ.setdefault("RETRIEVE_EMBED_RERANK", "false")
 
 import hashlib  # noqa: E402
 

@@ -56,6 +56,7 @@ class LexicalIndex:
         self._docs: dict[str, _Doc] = {}
         self._by_unit: dict[str, set[str]] = defaultdict(set)
         self._df: Counter = Counter()
+        self._postings: dict[str, set[str]] = defaultdict(set)
         self._total_len = 0
 
     def _doc_key(self, unit_id: str, chunk_id: str, version_id: str) -> str:
@@ -100,6 +101,7 @@ class LexicalIndex:
                 self._total_len += doc.length
                 for term in doc.term_freq:
                     self._df[term] += 1
+                    self._postings[term].add(key)
             return len(prepared)
 
     def delete_unit(self, unit_id: str) -> int:
@@ -118,12 +120,18 @@ class LexicalIndex:
             self._df[term] = max(0, self._df[term] - 1)
             if self._df[term] == 0:
                 self._df.pop(term, None)
+            postings = self._postings.get(term)
+            if postings is not None:
+                postings.discard(key)
+                if not postings:
+                    self._postings.pop(term, None)
 
     def clear(self) -> None:
         with self._lock:
             self._docs.clear()
             self._by_unit.clear()
             self._df.clear()
+            self._postings.clear()
             self._total_len = 0
 
     def doc_count(self) -> int:
@@ -142,25 +150,28 @@ class LexicalIndex:
         if not terms:
             return []
         with self._lock:
-            docs = list(self._docs.values())
-            n_docs = max(1, len(docs))
-            avgdl = (self._total_len / n_docs) if n_docs else 1.0
+            n_docs = max(1, len(self._docs))
+            avgdl = (self._total_len / n_docs) if self._docs else 1.0
             df = Counter(self._df)
+            # Inverted-index candidates only (avoid full scan + unit_id-order cap bias).
+            cand_keys: set[str] = set()
+            for term in set(terms):
+                cand_keys |= self._postings.get(term, set())
+            cap = int(max_docs or 0)
+            if cap > 0 and len(cand_keys) > cap:
+                # Safety valve only: stable key order, not unit_id corpus order.
+                cand_keys = set(sorted(cand_keys)[:cap])
+                logger.warning("lexical posting cap applied candidates>=%s", cap)
+            docs = [self._docs[k] for k in cand_keys if k in self._docs]
+            cand_n = len(docs)
+        try:
+            from core.circuit import get_metrics
+
+            get_metrics().inc("lexical.posting_candidates", cand_n)
+        except Exception:
+            pass
         if not docs:
             return []
-
-        # Cap scoring cost: score only first N docs in stable (unit_id, chunk_index) order.
-        cap = int(max_docs or 0)
-        if cap > 0 and len(docs) > cap:
-            docs = sorted(docs, key=lambda d: (d.unit_id, d.chunk_index, d.chunk_id))[:cap]
-            logger.warning(
-                "lexical max_docs cap applied scored=%s skipped=%s",
-                cap,
-                max(0, n_docs - cap),
-            )
-            # Recompute n_docs for idf using the scored subset.
-            n_docs = max(1, len(docs))
-            avgdl = (sum(d.length for d in docs) / n_docs) if docs else 1.0
 
         k1 = 1.5
         b = 0.75
@@ -208,6 +219,7 @@ class LexicalIndex:
             self._docs.clear()
             self._by_unit.clear()
             self._df.clear()
+            self._postings.clear()
             self._total_len = 0
         count = 0
         for unit, docs in by_unit.items():

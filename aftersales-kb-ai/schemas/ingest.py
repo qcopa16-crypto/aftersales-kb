@@ -46,6 +46,8 @@ class EmbedResponse(BaseModel):
     resumed_from: int = 0
     partial: bool = False
     ingest_id: str | None = None
+    # encode_ms / publish_ms wall-clock (observability; additive).
+    stage_timings: dict[str, float] = Field(default_factory=dict)
 
 
 class ParseChunk(BaseModel):
@@ -99,6 +101,8 @@ class ParseResponse(BaseModel):
     # Heuristic only; Java decides whether to persist.
     suggested_category: str | None = None
     permission_hint: str | None = None
+    # extract_ms / vlm_ms / chunk_ms wall-clock (observability; additive).
+    stage_timings: dict[str, float] = Field(default_factory=dict)
 
 
 class DeleteUnitResponse(BaseModel):

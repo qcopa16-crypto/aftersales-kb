@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from core.config import Settings
+from core.circuit import get_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -235,10 +236,11 @@ class MemoryVectorStore(VectorStore):
                 )
             # 3) switch active
             self._active[unit_id] = version_id
-            # 4) cleanup old versions
-            for rid, row in list(self._rows.items()):
-                if row["unit_id"] == unit_id and row["version_id"] != version_id:
-                    del self._rows[rid]
+            # 4) cleanup previous active version only (no full orphan scan)
+            if prev_active and prev_active != version_id:
+                for rid, row in list(self._rows.items()):
+                    if row["unit_id"] == unit_id and row["version_id"] == prev_active:
+                        del self._rows[rid]
             logger.info(
                 "memory publish unit_id=%s version=%s count=%s prev=%s",
                 unit_id,
@@ -345,6 +347,10 @@ class MilvusVectorStore(VectorStore):
         # Single-writer process-local persistence so restarts keep active map.
         self._active_map_path = active_map_path
         self._embed_require_acl_fields = bool(embed_require_acl_fields)
+        # Publish throughput knobs (optional; tests may leave defaults).
+        self._insert_batch_size = 500
+        self._count_validate_max = 200
+        self._orphan_sweep_on_publish = False
 
     def ensure_collection(self) -> None:
         from pymilvus import DataType
@@ -549,6 +555,29 @@ class MilvusVectorStore(VectorStore):
             row["acl_classification"] = item.acl_classification or ""
         return row
 
+    def _version_has_rows(self, unit_id: str, version_id: str) -> bool:
+        """Cheap existence check for large publishes (avoid full count scan)."""
+        safe_id = unit_id.replace("\\", "\\\\").replace('"', '\\"')
+        safe_ver = version_id.replace("\\", "\\\\").replace('"', '\\"')
+        try:
+            res = self._client.query(
+                collection_name=self._collection,
+                filter=f'unit_id == "{safe_id}" and version_id == "{safe_ver}"',
+                output_fields=["id"],
+                limit=1,
+            )
+            return bool(res)
+        except TypeError:
+            # Older clients without limit kwarg
+            res = self._client.query(
+                collection_name=self._collection,
+                filter=f'unit_id == "{safe_id}" and version_id == "{safe_ver}"',
+                output_fields=["id"],
+            )
+            return bool(res)
+        except Exception as exc:
+            raise PublishValidationError(f"version sample query failed: {exc}") from exc
+
     def _count_version(self, unit_id: str, version_id: str) -> int:
         safe_id = unit_id.replace("\\", "\\\\").replace('"', '\\"')
         safe_ver = version_id.replace("\\", "\\\\").replace('"', '\\"')
@@ -607,29 +636,50 @@ class MilvusVectorStore(VectorStore):
 
         version_id = _new_version_id()
         data = [self._row_payload(unit_id, item, version_id) for item in items]
+        insert_batch = max(1, int(getattr(self, "_insert_batch_size", 500) or 500))
+        count_validate_max = int(getattr(self, "_count_validate_max", 200) or 200)
+        orphan_sweep = bool(getattr(self, "_orphan_sweep_on_publish", False))
         with self._active_lock:
             prev = self._active.get(unit_id)
             try:
-                # 1) write temp version
-                self._client.insert(collection_name=self._collection, data=data)
+                # 1) write temp version in batches (single flush at end)
+                for i in range(0, len(data), insert_batch):
+                    self._client.insert(
+                        collection_name=self._collection, data=data[i : i + insert_batch]
+                    )
+                    get_metrics().inc("milvus.publish_batch")
                 try:
                     self._client.flush(self._collection)
                 except Exception:
                     logger.debug("milvus flush skipped", exc_info=True)
-                # 2) validate
-                count = self._count_version(unit_id, version_id)
-                if count != len(items):
-                    raise PublishValidationError(
-                        f"milvus staged count {count} != expected {len(items)}"
-                    )
+                # 2) validate: full count for small units; sample existence for large
+                if len(items) <= count_validate_max:
+                    count = self._count_version(unit_id, version_id)
+                    if count != len(items):
+                        raise PublishValidationError(
+                            f"milvus staged count {count} != expected {len(items)}"
+                        )
+                else:
+                    if not self._version_has_rows(unit_id, version_id):
+                        raise PublishValidationError(
+                            f"milvus staged version empty after insert expected={len(items)}"
+                        )
+                    get_metrics().inc("milvus.publish_count_skipped")
                 # 3) switch active
                 self._active[unit_id] = version_id
                 self._save_active_map()
-                # 4) cleanup old / non-active
+                # 4) cleanup previous active only (fast path); optional full orphan sweep
                 try:
-                    self._delete_non_active(unit_id, version_id)
+                    if prev and prev != version_id:
+                        self._delete_version(unit_id, prev)
+                    if orphan_sweep:
+                        self._delete_non_active(unit_id, version_id)
                 except Exception:
                     logger.exception("milvus cleanup old versions failed unit_id=%s", unit_id)
+                try:
+                    self._client.flush(self._collection)
+                except Exception:
+                    logger.debug("milvus flush after cleanup skipped", exc_info=True)
                 logger.info(
                     "milvus publish unit_id=%s version=%s count=%s prev=%s",
                     unit_id,
@@ -792,11 +842,15 @@ def create_vector_store(cfg: Settings) -> VectorStore:
     if kind == "memory":
         return MemoryVectorStore(dim=cfg.embed_dim)
     if kind == "milvus":
-        return MilvusVectorStore(
+        store = MilvusVectorStore(
             uri=cfg.milvus_uri,
             collection=cfg.milvus_collection,
             dim=cfg.embed_dim,
             active_map_path=cfg.milvus_active_map_path or None,
             embed_require_acl_fields=bool(cfg.embed_require_acl_fields),
         )
+        store._insert_batch_size = int(getattr(cfg, "milvus_insert_batch_size", 500) or 500)
+        store._count_validate_max = int(getattr(cfg, "milvus_count_validate_max", 200) or 200)
+        store._orphan_sweep_on_publish = bool(getattr(cfg, "milvus_orphan_sweep_on_publish", False))
+        return store
     raise RuntimeError(f"unknown VECTOR_STORE: {kind}")

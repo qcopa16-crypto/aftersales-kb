@@ -24,6 +24,21 @@ logger = logging.getLogger(__name__)
 _DONE = {"done", "success", "completed"}
 _FAILED = {"failed", "error", "cancelled"}
 
+# Document/content faults: bad PDF should not open the global MinerU circuit.
+# Service/dependency faults still record_failure. Cancel/timeout/quota stay non-health.
+_DOC_FAULT_CODES = {
+    "MINERU_EXTRACT_FAILED",
+    "MINERU_EMPTY_MD",
+    "MINERU_BAD_FILE",
+    "MINERU_BAD_ZIP",
+}
+_NON_HEALTH_CODES = {
+    "MINERU_DAILY_QUOTA",
+    "TASK_CANCELLED",
+    "MINERU_TIMEOUT",
+    "MINERU_CIRCUIT_OPEN",
+}
+
 # (stage, progress_0_100, detail) — used by async worker / Java-visible logs.
 ProgressFn = Callable[[str, int, str], None]
 CancelFn = Callable[[], bool]
@@ -84,6 +99,28 @@ class MinerUClient:
         limits = get_limits()
         batch_store = get_mineru_batch_store(cfg_live.mineru_batch_store_path)
         file_hash = _file_sha256(pdf_path)
+        extract_cache = None
+        extract_key = ""
+        if getattr(cfg_live, "mineru_extract_cache_enabled", False):
+            from ai.ingest.mineru_extract_cache import extract_cache_key, get_mineru_extract_cache
+
+            extract_key = extract_cache_key(
+                file_hash,
+                model_version=cfg_live.mineru_model_version,
+                language=cfg_live.mineru_language,
+                enable_table=cfg_live.mineru_enable_table,
+                enable_formula=cfg_live.mineru_enable_formula,
+                is_ocr=cfg_live.mineru_is_ocr,
+            )
+            extract_cache = get_mineru_extract_cache(
+                cfg_live.mineru_extract_cache_dir,
+                max_entries=cfg_live.mineru_extract_cache_max_entries,
+            )
+            cached = extract_cache.get(extract_key)
+            if cached is not None:
+                metrics.inc("mineru.cache_hit")
+                logger.info("MinerU extract cache hit file=%s key=%s", pdf_path.name, extract_key)
+                return cached
         existing_batch = batch_store.get_batch_id(file_hash)
 
         t0 = time.monotonic()
@@ -98,6 +135,8 @@ class MinerUClient:
                     )
                     out = self._parse_result(result)
                     batch_store.clear(file_hash)
+                    if extract_cache is not None:
+                        extract_cache.put(extract_key, out[0], out[1], out[2])
                     circuits.record_success("mineru")
                     metrics.inc("mineru.ok")
                     metrics.observe_ms("mineru", (time.monotonic() - t0) * 1000)
@@ -136,19 +175,18 @@ class MinerUClient:
             result = self._poll_result(batch_id, on_progress=on_progress, should_cancel=should_cancel)
             out = self._parse_result(result)
             batch_store.clear(file_hash)
+            if extract_cache is not None:
+                extract_cache.put(extract_key, out[0], out[1], out[2])
             circuits.record_success("mineru")
             metrics.inc("mineru.ok")
             metrics.observe_ms("mineru", (time.monotonic() - t0) * 1000)
             return out
         except MinerUError as exc:
-            # Cancel/timeout are not dependency health signals; do not trip circuit.
-            if exc.error_code not in {
-                "MINERU_DAILY_QUOTA",
-                "TASK_CANCELLED",
-                "MINERU_TIMEOUT",
-                "MINERU_CIRCUIT_OPEN",
-            }:
+            # Document faults and cancel/timeout/quota are not dependency health signals.
+            if exc.error_code not in _NON_HEALTH_CODES and exc.error_code not in _DOC_FAULT_CODES:
                 circuits.record_failure("mineru", str(exc))
+            elif exc.error_code in _DOC_FAULT_CODES:
+                metrics.inc("mineru.doc_fault")
             if exc.error_code != "TASK_CANCELLED":
                 metrics.inc("mineru.fail")
             raise

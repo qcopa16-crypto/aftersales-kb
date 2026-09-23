@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
@@ -104,6 +105,11 @@ def build_ingest_graph(
         if cancel_check and cancel_check():
             raise IngestGraphError("task cancelled", "TASK_CANCELLED", 499)
 
+    def _merge_timings(state: IngestState, key: str, ms: float) -> dict[str, float]:
+        timings = dict(state.get("stage_timings") or {})
+        timings[key] = round(float(ms), 3)
+        return timings
+
     def resolve_source(state: IngestState) -> IngestState:
         _check_cancel()
         on_progress("fetch", 5, "resolving source")
@@ -114,6 +120,7 @@ def build_ingest_graph(
         unit_id = state["unit_id"]
         _check_cancel()
         on_progress("parse", 15, f"extract {ft}")
+        extract_t0 = time.monotonic()
         text = ""
         page_count: int | None = None
         image_bytes_map: dict[str, bytes] = {}
@@ -206,6 +213,9 @@ def build_ingest_graph(
                         "image_bytes_map": image_bytes_map,
                         "images": images,
                         "stage": "parse",
+                        "stage_timings": _merge_timings(
+                            state, "extract_ms", (time.monotonic() - extract_t0) * 1000
+                        ),
                     }
                 if raw is None and state.get("source_url"):
                     with tempfile.TemporaryDirectory(prefix="kb_src_") as tmp:
@@ -271,6 +281,9 @@ def build_ingest_graph(
             "image_bytes_map": image_bytes_map,
             "images": images,
             "stage": "parse",
+            "stage_timings": _merge_timings(
+                state, "extract_ms", (time.monotonic() - extract_t0) * 1000
+            ),
         }
 
     def vlm_captions(state: IngestState) -> IngestState:
@@ -278,16 +291,27 @@ def build_ingest_graph(
         image_bytes_map = state.get("image_bytes_map") or {}
         images = list(state.get("images") or [])
         text = state.get("text") or ""
+        vlm_t0 = time.monotonic()
         if not use_vlm or not vlm.available or not image_bytes_map:
             on_progress("vlm", 50, "skip vlm")
-            return {"images": images, "text": text, "stage": "vlm"}
+            return {
+                "images": images,
+                "text": text,
+                "stage": "vlm",
+                "stage_timings": _merge_timings(state, "vlm_ms", 0.0),
+            }
 
         circuits = get_circuits(cfg.circuit_failure_threshold, cfg.circuit_cooldown_sec)
         metrics = get_metrics()
         if circuits.is_open("vlm"):
             metrics.inc("vlm.circuit_open")
             on_progress("vlm", 50, "vlm circuit open, skip")
-            return {"images": images, "text": text, "stage": "vlm"}
+            return {
+                "images": images,
+                "text": text,
+                "stage": "vlm",
+                "stage_timings": _merge_timings(state, "vlm_ms", 0.0),
+            }
 
         _check_cancel()
         on_progress("vlm", 50, "describing images")
@@ -346,11 +370,19 @@ def build_ingest_graph(
                         img["caption"] = None
         if captions:
             text = inject_captions_into_markdown(text, captions)
-        return {"images": images, "text": text, "stage": "vlm"}
+        return {
+            "images": images,
+            "text": text,
+            "stage": "vlm",
+            "stage_timings": _merge_timings(
+                state, "vlm_ms", (time.monotonic() - vlm_t0) * 1000
+            ),
+        }
 
     def chunk_and_quality(state: IngestState) -> IngestState:
         _check_cancel()
         on_progress("chunk", 85, "splitting")
+        chunk_t0 = time.monotonic()
         text = state.get("text") or ""
         images = state.get("images") or []
         page_count = state.get("page_count")
@@ -397,6 +429,9 @@ def build_ingest_graph(
             "suggested_category": suggested_category,
             "permission_hint": permission_hint,
             "stage": "done",
+            "stage_timings": _merge_timings(
+                state, "chunk_ms", (time.monotonic() - chunk_t0) * 1000
+            ),
         }
 
     def route_after_extract(state: IngestState) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
@@ -22,7 +23,12 @@ from schemas.ingest import (
     ParseTaskStatus,
 )
 from ai.ingest.chunker import enrich_chunk_for_embed, split_markdown
-from ai.ingest.content_cache import content_hash, get_parse_cache
+from ai.ingest.content_cache import (
+    content_hash,
+    file_content_hash,
+    get_disk_parse_cache,
+    get_parse_cache,
+)
 from ai.embed.embedder import Embedder
 from ai.ingest.fingerprint import chunks_fingerprint, content_fingerprint
 from core.limits import get_limits
@@ -89,9 +95,25 @@ async def parse(
         if spool_path is not None:
             file_path = str(spool_path)
     cache = get_parse_cache(cfg.parse_cache_max)
+    disk_cache = (
+        get_disk_parse_cache(cfg.parse_cache_disk_dir, cfg.parse_cache_disk_max_entries)
+        if getattr(cfg, "parse_cache_disk_enabled", False)
+        else None
+    )
     cache_key: str | None = None
-    if cfg.enable_parse_idempotency and source_url is None and file_bytes is not None:
-        # Only hash in-memory uploads; large spooled files skip cache to avoid re-read.
+    if cfg.enable_parse_idempotency and source_url is None and spool_path is not None and file_bytes is None:
+        # Spooled large upload: stream-hash the file so restarts can still hit cache.
+        cache_key = file_content_hash(
+            spool_path,
+            file_type=ft,
+            chunk_size=size,
+            chunk_overlap=overlap,
+            use_vlm=use_vlm,
+            parser_version=cfg.parser_version,
+            embed_model=embed_model_id(cfg),
+            config_version=cfg.cache_config_version,
+        )
+    elif cfg.enable_parse_idempotency and source_url is None and file_bytes is not None:
         cache_key = content_hash(
             file_type=ft,
             file_bytes=file_bytes,
@@ -103,19 +125,6 @@ async def parse(
             embed_model=embed_model_id(cfg),
             config_version=cfg.cache_config_version,
         )
-        hit = cache.get(cache_key)
-        if hit is not None:
-            if spool_path is not None:
-                spool_path.unlink(missing_ok=True)
-            payload = dict(hit)
-            payload["unit_id"] = uid
-            payload["cache_hit"] = True
-            payload["ingest_id"] = ingest_id or None
-            if not payload.get("content_hash"):
-                payload["content_hash"] = content_fingerprint(payload.get("markdown") or "")
-            if not payload.get("chunks_hash"):
-                payload["chunks_hash"] = chunks_fingerprint(payload.get("chunks") or [])
-            return ParseResponse(**payload)
     elif cfg.enable_parse_idempotency and source_url is None and file is None:
         cache_key = content_hash(
             file_type=ft,
@@ -128,8 +137,13 @@ async def parse(
             embed_model=embed_model_id(cfg),
             config_version=cfg.cache_config_version,
         )
+    if cache_key is not None:
         hit = cache.get(cache_key)
+        if hit is None and disk_cache is not None:
+            hit = disk_cache.get(cache_key)
         if hit is not None:
+            if spool_path is not None:
+                spool_path.unlink(missing_ok=True)
             payload = dict(hit)
             payload["unit_id"] = uid
             payload["cache_hit"] = True
@@ -198,7 +212,10 @@ async def parse(
         else:
             result = run_parse(**parse_kwargs)
         if cache_key is not None:
-            cache.put(cache_key, result.model_dump())
+            dumped = result.model_dump()
+            cache.put(cache_key, dumped)
+            if disk_cache is not None:
+                disk_cache.put(cache_key, dumped)
         return result
     except ParsePipelineError as exc:
         raise HTTPException(
@@ -536,6 +553,7 @@ def embed(
     resume_from = body.resume_from_index if cfg.embed_resume_enabled else 0
     if resume_from >= len(body.chunks):
         raise HTTPException(status_code=400, detail="resume_from_index out of range")
+    stage_timings: dict[str, float] = {}
 
     try:
         with get_unit_locks().hold(unit_id):
@@ -584,6 +602,7 @@ def embed(
 
             batch = max(1, cfg.embed_batch_size)
             embed_policy = RetryPolicy(max_attempts=3, base_delay_sec=0.2, max_delay_sec=5.0)
+            encode_t0 = time.monotonic()
             for i in range(resume_from, len(texts), batch):
                 # Transient embedder faults (5xx/timeout) retry with exponential backoff.
                 vectors.extend(
@@ -607,6 +626,7 @@ def embed(
 
             if len(vectors) != len(body.chunks):
                 raise RuntimeError(f"encode count mismatch: {len(vectors)} != {len(body.chunks)}")
+            encode_ms = (time.monotonic() - encode_t0) * 1000
             items = [
                 VectorItem(
                     chunk_index=c.chunk_index,
@@ -621,6 +641,7 @@ def embed(
                 for i, c in enumerate(body.chunks)
             ]
             # Atomic version publish: temp write → validate → switch → cleanup.
+            publish_t0 = time.monotonic()
             count = store.replace_unit(unit_id, items)
             partial_store.clear(unit_id)
             circuits.record_success("embed")
@@ -646,6 +667,11 @@ def embed(
                 )
             except Exception:
                 logger.warning("lexical index update failed unit_id=%s", unit_id, exc_info=True)
+            publish_ms = (time.monotonic() - publish_t0) * 1000
+            stage_timings = {
+                "encode_ms": round(encode_ms, 3),
+                "publish_ms": round(publish_ms, 3),
+            }
     except HTTPException:
         get_metrics().inc("embed.quality_or_validation_fail")
         raise
@@ -684,6 +710,7 @@ def embed(
         resumed_from=resume_from,
         partial=False,
         ingest_id=body.ingest_id or None,
+        stage_timings=stage_timings,
     )
 
 

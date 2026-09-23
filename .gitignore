@@ -1,9 +1,9 @@
 # =========================================================
-# GitHub 上传策略：只保留 README、代码、.env.example
-# 数据（demo 知识/样本产物）、文档（docs/DESIGN/规范/调研）一律不传
+# 上传策略：只保留 README、业务/AI 源码、金标数据、.env.example
+# 文档（docs/DESIGN/规范）、测评报告（samples/）、运行时（.data/）一律不传
 # =========================================================
 
-# ----- 默认全部忽略，再白名单放行代码 -----
+# ----- 默认全部忽略，再白名单放行 -----
 /*
 
 # 根 README + 忽略规则本身
@@ -20,24 +20,34 @@
 !aftersales-kb-ai/README.md
 !aftersales-kb-ai/main.py
 !aftersales-kb-ai/requirements.txt
+!aftersales-kb-ai/requirements.lock.txt
 !aftersales-kb-ai/.env.example
+!aftersales-kb-ai/test_main.http
 !aftersales-kb-ai/app/
 !aftersales-kb-ai/app/**
+!aftersales-kb-ai/ai/
+!aftersales-kb-ai/ai/**
+!aftersales-kb-ai/core/
+!aftersales-kb-ai/core/**
+!aftersales-kb-ai/schemas/
+!aftersales-kb-ai/schemas/**
 !aftersales-kb-ai/tests/
 !aftersales-kb-ai/tests/**
 !aftersales-kb-ai/scripts/
 !aftersales-kb-ai/scripts/**
-!aftersales-kb-ai/test_main.http
 
-# ----- 强制排除：密钥 / 缓存 / 环境 / 文档 / 数据 / 样例 -----
-aftersales-kb-ai/samples/
+# 金标 / denylist（应版本化）
+!aftersales-kb-ai/scripts/data/
+!aftersales-kb-ai/scripts/data/**
+
+# ----- 强制排除：密钥 / 环境 / 缓存 / 报告 / 文档 / 大样例 -----
 .env
 .env.local
 *.env
 aftersales-kb-ai/.env
-aftersales-kb-ai/.venv/
 .venv/
 venv/
+aftersales-kb-ai/.venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -46,19 +56,29 @@ __pycache__/
 .idea/
 *.iml
 target/
-.ai-memory/
-.reorg-backup/
-.worktrees/
-.mimocode/
-research/
+
+# 测评报告与样例产物（本机）
+aftersales-kb-ai/samples/
+aftersales-kb-ai/uploads/
+aftersales-kb-ai/mineru_out/
+
+# 运行时状态 / 缓存（parse、MinerU 提取、向量版本 map 等）
+aftersales-kb-ai/.data/
+aftersales-kb-ai/.data/**
+*.tmp
+
+# 文档 / 调研 / 本地工作区噪音
 docs/
 DESIGN.md
 代码设计规范.md
 aftersales-kb-ai/docs/
 aftersales-kb-ai/MinerU.md
 aftersales-kb-ai/MinerU_限流文档.md
-aftersales-kb-ai/uploads/
-aftersales-kb-ai/mineru_out/
+.ai-memory/
+.reorg-backup/
+.worktrees/
+.mimocode/
+research/
 
 # OS
 Thumbs.db

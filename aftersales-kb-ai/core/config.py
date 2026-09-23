@@ -96,14 +96,24 @@ class Settings(BaseSettings):
     retrieve_top_k_default: int = 8
 
     # Hybrid retrieve (dense + lexical + RRF)
-    retrieve_overfetch_factor: int = 3
+    retrieve_overfetch_factor: int = 4
     retrieve_overfetch_max: int = 50
     retrieve_max_per_unit: int = 2
-    retrieve_enable_rerank: bool = False
+    # Rank by best-chunk-per-unit first (debias multi-chunk manuals).
+    # Off by default: unit-level first-chunk order can bury the true answer chunk.
+    retrieve_unit_agg: bool = False
+    retrieve_enable_rerank: bool = True
+    # Lightweight synonym/paraphrase expansion (query_expand.py).
+    retrieve_query_expand: bool = True
+    # Second-pass embed cosine rerank on top-N candidates.
+    retrieve_embed_rerank: bool = True
+    retrieve_embed_rerank_top: int = 20
+    retrieve_embed_rerank_weight: float = 0.35
     retrieve_require_acl: bool = False
     retrieve_max_question_chars: int = 2000
     retrieve_hybrid_enabled: bool = True
     retrieve_hybrid_rrf_k: int = 60
+    retrieve_lexical_rrf_weight: float = 0.35
     retrieve_hybrid_degrade_to_dense: bool = True
     retrieve_hybrid_lexical_mode: str = "memory_bm25"
 
@@ -119,7 +129,9 @@ class Settings(BaseSettings):
     # Full retrieve pipeline budget (0 = disabled); on exceed → 504 RETRIEVE_TIMEOUT.
     retrieve_overall_timeout_sec: float = 8.0
     # Cap documents scored by lexical path; score only first N in stable order.
-    retrieve_lexical_max_docs: int = 5000
+    retrieve_lexical_max_docs: int = 20000
+    # Cold-start load limit for sync_from_store (0 = no cap). Separate from query candidate cap.
+    retrieve_lexical_sync_limit: int = 16384
     # When true, skip lexical path entirely if doc_count exceeds cap (default: still score first N).
     retrieve_lexical_skip_when_over_cap: bool = False
     # Multi-replica safety: dense-only when true (process-local lexical/active map unsafe).
@@ -175,6 +187,19 @@ class Settings(BaseSettings):
     error_message_max_chars: int = 500
     metrics_public: bool = False
     refuse_on_default_internal_token: bool = False
+
+    # Publish throughput (S2.1 ingest-publish-cache-uplift)
+    milvus_insert_batch_size: int = 500
+    milvus_count_validate_max: int = 200
+    milvus_orphan_sweep_on_publish: bool = False
+
+    # Parse / MinerU disk reuse (S2.2)
+    parse_cache_disk_enabled: bool = True
+    parse_cache_disk_dir: str = ".data/parse_cache"
+    parse_cache_disk_max_entries: int = 128
+    mineru_extract_cache_enabled: bool = True
+    mineru_extract_cache_dir: str = ".data/mineru_extract_cache"
+    mineru_extract_cache_max_entries: int = 200
 
 
 @lru_cache

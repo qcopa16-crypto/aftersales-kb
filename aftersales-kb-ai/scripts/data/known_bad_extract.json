@@ -1,0 +1,48 @@
+{
+  "case_ids": [
+    "eval_full_016722400b5d86eb",
+    "eval_full_090f420330133b3e",
+    "eval_full_5fe62be4d6bf2c4f",
+    "eval_full_e4a08df563ac74ba",
+    "eval_full_f14ae01b98ed5089"
+  ],
+  "entries": [
+    {
+      "case_id": "eval_full_016722400b5d86eb",
+      "source_rel": "docs/demo-knowledge/product/M3系列&T3&M3470系列用户手册.pdf",
+      "error_code": "MINERU_EXTRACT_FAILED",
+      "action": "replace_source_or_exclude",
+      "note": "MinerU permanent extract failure; excluded from positive denominator when skipped"
+    },
+    {
+      "case_id": "eval_full_090f420330133b3e",
+      "source_rel": "docs/demo-knowledge/product/hl3070使用说明书.pdf",
+      "error_code": "MINERU_EXTRACT_FAILED",
+      "action": "replace_source_or_exclude",
+      "note": "MinerU permanent extract failure; excluded from positive denominator when skipped"
+    },
+    {
+      "case_id": "eval_full_5fe62be4d6bf2c4f",
+      "source_rel": "docs/demo-knowledge/product/LJ2680DN用户手册.pdf",
+      "error_code": "MINERU_EXTRACT_FAILED",
+      "action": "replace_source_or_exclude",
+      "note": "MinerU permanent extract failure; excluded from positive denominator when skipped"
+    },
+    {
+      "case_id": "eval_full_e4a08df563ac74ba",
+      "source_rel": "docs/demo-knowledge/product/M3070系列用户手册.pdf",
+      "error_code": "MINERU_EXTRACT_FAILED",
+      "action": "replace_source_or_exclude",
+      "note": "MinerU permanent extract failure; excluded from positive denominator when skipped"
+    },
+    {
+      "case_id": "eval_full_f14ae01b98ed5089",
+      "source_rel": "docs/demo-knowledge/product/CS2610DNW_Manuals_ALL_20240423095554.pdf",
+      "error_code": "MINERU_EXTRACT_FAILED",
+      "action": "replace_source_or_exclude",
+      "note": "MinerU permanent extract failure; excluded from positive denominator when skipped"
+    }
+  ],
+  "updated": "2026-09-24 00:35:55",
+  "note": "MinerU permanent extract failures. Excluded from positive scoring denominator when skipped; see ledger permanent_fail. Replace source or keep excluded."
+}
