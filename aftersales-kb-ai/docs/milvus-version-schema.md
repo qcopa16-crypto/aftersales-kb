@@ -22,7 +22,7 @@
 2. 若缺可选字段，调用 **`add_collection_field(..., data_type=DataType.VARCHAR, ...)`**（pymilvus 3.x）。
 3. **升级失败**：进入 **legacy 模式**（`delete → insert`），并打 warning；功能可用，但无版本原子切换。
 
-### 生产集合 `kb_ai_chunks` 评估（2026-02-15，真机 127.0.0.1）
+### 生产集合 `kb_ai_chunks` 评估（2026-02-15，真机环境）
 
 | 项 | 现状 |
 |----|------|

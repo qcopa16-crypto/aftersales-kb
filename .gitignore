@@ -12,9 +12,10 @@
 # ----- 默认全部忽略，再白名单放行 -----
 /*
 
-# 根 README + 忽略规则本身
+# 根 README + 忽略规则本身 + 环境变量模板（仅占位符）
 !README.md
 !.gitignore
+!.env.example
 
 # ----- CI 配置（GitHub Actions）：必须入库，否则 workflow 不生效 -----
 !.github/
@@ -39,7 +40,7 @@
 !scripts/
 !scripts/**
 
-# ----- AI 服务代码 -----
+# ----- AI 服务代码（不含 scripts/ 与 tests/：评测金标与测试代码不入库）-----
 !aftersales-kb-ai/
 !aftersales-kb-ai/README.md
 !aftersales-kb-ai/main.py
@@ -55,17 +56,6 @@
 !aftersales-kb-ai/core/**
 !aftersales-kb-ai/schemas/
 !aftersales-kb-ai/schemas/**
-!aftersales-kb-ai/tests/
-!aftersales-kb-ai/tests/**
-!aftersales-kb-ai/scripts/
-!aftersales-kb-ai/scripts/**
-
-# 金标 / denylist（应版本化）
-!aftersales-kb-ai/scripts/data/
-!aftersales-kb-ai/scripts/data/**
-
-# 备份文件不入库：金标/门禁的 .bak* 只在本地保留
-aftersales-kb-ai/scripts/data/*.bak*
 
 # ----- 强制排除：密钥 / 环境 / 缓存 / 报告 / 文档 / 大样例 -----
 .env
@@ -153,6 +143,23 @@ deploy/**/.env.*
 # 演示知识中的产品手册 PDF 体积大，不随代码分发（与 README「安全与仓库约定」一致）；
 # 该规则必须位于 `!docs/**` 之后，才能覆盖上面放行。
 docs/demo-knowledge/product/
+
+# =========================================================
+# 数据与测试代码不入库（用户要求：data / 评测金标 / 单元测试 一律不上传）
+# ⚠️ 必须位于上面所有 `!` allowlist 之后（git last-match-wins），否则不生效
+# =========================================================
+# 运行时数据与上传语料
+data/
+# AI 侧评测/验收脚本与金标数据（含业务语料）
+aftersales-kb-ai/scripts/
+aftersales-kb-ai/scripts/**
+# 单元测试：AI 侧与 Java 侧
+aftersales-kb-ai/tests/
+aftersales-kb-ai/tests/**
+src/test/
+# 运行时状态（曾误入库，禁止再入库）
+aftersales-kb-ai/.data/
+aftersales-kb-ai/.data/**
 
 # 追加到 .gitignore 末尾（必须在所有 !allowlist 之后）
 *.log
