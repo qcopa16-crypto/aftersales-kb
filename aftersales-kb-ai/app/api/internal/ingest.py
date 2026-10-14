@@ -1,8 +1,8 @@
 """Ingest /internal routes: parse, async tasks, embed, delete."""
+
 from __future__ import annotations
 
 import logging
-import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -22,7 +22,7 @@ from schemas.ingest import (
     ParseTaskAccepted,
     ParseTaskStatus,
 )
-from ai.ingest.chunker import enrich_chunk_for_embed, split_markdown
+from ai.ingest.chunker import enrich_chunk_for_embed
 from ai.ingest.content_cache import (
     content_hash,
     file_content_hash,
@@ -31,29 +31,29 @@ from ai.ingest.content_cache import (
 )
 from ai.embed.embedder import Embedder
 from ai.ingest.fingerprint import chunks_fingerprint, content_fingerprint
-from core.limits import get_limits
 from ai.ingest.mineru_client import MinerUClient
 from ai.ingest.parse import ParsePipelineError, run_parse
+from ai.ingest.review_image_cache import has_cached_images
 from ai.ingest.task_store import get_task_store
+from ai.retrieve import index_health
 from ai.retrieve.lexical import get_lexical_index
+from ai.retrieve.sparse import get_sparse_index
 from ai.retrieve.store import PublishValidationError, VectorItem, VectorStore, _stable_id
-from ai.generate.vlm import VlmClient, VlmError
+from ai.generate.vlm import VlmClient
 from core.circuit import get_circuits, get_metrics
-from core.errors import detail_body, safe_message, sanitize_text
+from core.errors import detail_body, safe_message
 from core.retry import RetryPolicy, retry_call
 from core.trace import get_trace_id, set_trace_id
 from core.unit_lock import get_unit_locks
 
 from app.api.internal._common import (
-    _ALLOWED_TYPES,
-    _UNIT_ID_RE,
     _chunk_params,
     _enforce_markdown_limit,
     _get_parse_sem,
     _max_msg,
     _normalize_file_type,
     _parse_pool,
-    _parse_spool_dir,
+    _parse_spool_dir,  # noqa: F401  # 隐式再导出：tests 经 app.api.internal.ingest._parse_spool_dir 访问
     _require_source,
     _require_unit_id,
     _spool_upload,
@@ -61,6 +61,44 @@ from app.api.internal._common import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["internal-ingest"])
+
+
+def _mark_index_repair(index: str, unit_id: str, exc: Exception) -> None:
+    """Record a durable index-repair marker; escalate when persistence failed (R-03).
+
+    ``mark_repair_needed`` returns False when the ledger could not be written. In
+    that case the marker is only in memory (lost on restart), so we must not
+    pretend the repair task is durably queued — emit a distinct metric and an
+    explicit error log for ops.
+    """
+    if not index_health.mark_repair_needed(index, unit_id, str(exc)):
+        get_metrics().inc("embed.index_repair_persist_failed")
+        logger.error(
+            "index repair marker NOT durable (ledger write failed) index=%s unit_id=%s",
+            index,
+            unit_id,
+        )
+
+
+def _cache_hit_has_review_images(payload: dict[str, Any], cfg: Settings) -> bool:
+    """Whether a disk-cache hit may be reused as-is for the review VLM tier.
+
+    A cached payload with images but no ``images/{content_hash}/`` cache (e.g.
+    parsed before the review-image cache existed) is treated as a miss so the
+    re-parse re-extracts and persists the image bytes. Only ``file_type=pdf`` is
+    affected: only MinerU yields image bytes, while md/docx images never do — so
+    forcing a re-parse for those would defeat the cache forever. Never raises;
+    on any error it degrades to the legacy cache-hit behaviour.
+    """
+    try:
+        if not payload.get("images"):
+            return True
+        if (payload.get("file_type") or "") != "pdf":
+            return True
+        return has_cached_images(payload.get("content_hash") or "", cfg)
+    except Exception:  # noqa: BLE001
+        return True
+
 
 @router.post("/parse", response_model=ParseResponse)
 async def parse(
@@ -101,7 +139,12 @@ async def parse(
         else None
     )
     cache_key: str | None = None
-    if cfg.enable_parse_idempotency and source_url is None and spool_path is not None and file_bytes is None:
+    if (
+        cfg.enable_parse_idempotency
+        and source_url is None
+        and spool_path is not None
+        and file_bytes is None
+    ):
         # Spooled large upload: stream-hash the file so restarts can still hit cache.
         cache_key = file_content_hash(
             spool_path,
@@ -142,17 +185,23 @@ async def parse(
         if hit is None and disk_cache is not None:
             hit = disk_cache.get(cache_key)
         if hit is not None:
-            if spool_path is not None:
-                spool_path.unlink(missing_ok=True)
             payload = dict(hit)
-            payload["unit_id"] = uid
-            payload["cache_hit"] = True
-            payload["ingest_id"] = ingest_id or None
             if not payload.get("content_hash"):
                 payload["content_hash"] = content_fingerprint(payload.get("markdown") or "")
             if not payload.get("chunks_hash"):
                 payload["chunks_hash"] = chunks_fingerprint(payload.get("chunks") or [])
-            return ParseResponse(**payload)
+            if _cache_hit_has_review_images(payload, cfg):
+                if spool_path is not None:
+                    spool_path.unlink(missing_ok=True)
+                payload["unit_id"] = uid
+                payload["cache_hit"] = True
+                payload["ingest_id"] = ingest_id or None
+                return ParseResponse(**payload)
+            logger.info(
+                "parse cache hit lacks review image cache; re-parsing unit_id=%s hash=%s",
+                uid,
+                payload.get("content_hash"),
+            )
 
     timed_out = False
     pool: ThreadPoolExecutor | None = None
@@ -416,7 +465,9 @@ def get_task(task_id: str) -> ParseTaskStatus:
     """Poll async parse task status and result."""
     task = get_task_store().get(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail={"error_code": "TASK_NOT_FOUND", "message": task_id})
+        raise HTTPException(
+            status_code=404, detail={"error_code": "TASK_NOT_FOUND", "message": task_id}
+        )
     public = task.to_public()
     result = public.get("result")
     return ParseTaskStatus(
@@ -440,7 +491,9 @@ def cancel_task(task_id: str) -> dict:
     """Request cancel of queued/running parse task."""
     store = get_task_store()
     if not store.get(task_id):
-        raise HTTPException(status_code=404, detail={"error_code": "TASK_NOT_FOUND", "message": task_id})
+        raise HTTPException(
+            status_code=404, detail={"error_code": "TASK_NOT_FOUND", "message": task_id}
+        )
     ok = store.request_cancel(task_id)
     return {"task_id": task_id, "cancel_requested": ok}
 
@@ -647,6 +700,9 @@ def embed(
             circuits.record_success("embed")
             get_metrics().inc("embed.ok")
             # Keep process-local lexical index aligned with dense path (same chunk ids).
+            # R-10: a failure here must NOT be a silent success — the dense version
+            # is already live, so record a durable repair task + metric (visible on
+            # /health) and schedule a full rebuild from the active chunks.
             try:
                 version_id = store.get_active_version(unit_id) or "legacy"
                 get_lexical_index().replace_unit(
@@ -654,7 +710,11 @@ def embed(
                     version_id,
                     [
                         {
-                            "id": _stable_id(unit_id, item.chunk_index, version_id if version_id != "legacy" else ""),
+                            "id": _stable_id(
+                                unit_id,
+                                item.chunk_index,
+                                version_id if version_id != "legacy" else "",
+                            ),
                             "chunk_index": item.chunk_index,
                             "content": item.content,
                             "version_id": version_id,
@@ -665,8 +725,56 @@ def embed(
                         for item in items
                     ],
                 )
-            except Exception:
-                logger.warning("lexical index update failed unit_id=%s", unit_id, exc_info=True)
+                index_health.clear_repair("lexical", unit_id)
+            except Exception as exc:
+                logger.error(
+                    "lexical index update failed unit_id=%s (marked for rebuild)",
+                    unit_id,
+                    exc_info=True,
+                )
+                get_metrics().inc("embed.index_sync_failed")
+                get_metrics().inc("embed.index_sync_failed_lexical")
+                _mark_index_repair("lexical", unit_id, exc)
+                index_health.schedule_rebuild(store=store, embedder=embedder, cfg=cfg)
+            # Keep process-local sparse index aligned (BGE-M3 lexical_weights).
+            if getattr(cfg, "retrieve_sparse_enabled", False) and getattr(
+                embedder, "supports_sparse", False
+            ):
+                try:
+                    sparse_version = store.get_active_version(unit_id) or "legacy"
+                    sparse_weights = retry_call(embedder.encode_sparse, texts, policy=embed_policy)
+                    get_sparse_index().replace_unit(
+                        unit_id,
+                        sparse_version,
+                        [
+                            {
+                                "id": _stable_id(
+                                    unit_id,
+                                    item.chunk_index,
+                                    sparse_version if sparse_version != "legacy" else "",
+                                ),
+                                "chunk_index": item.chunk_index,
+                                "content": item.content,
+                                "version_id": sparse_version,
+                                "acl_department": item.acl_department,
+                                "acl_classification": item.acl_classification,
+                                "heading_path": item.heading_path or [],
+                                "weights": sparse_weights[i],
+                            }
+                            for i, item in enumerate(items)
+                        ],
+                    )
+                    index_health.clear_repair("sparse", unit_id)
+                except Exception as exc:
+                    logger.error(
+                        "sparse index update failed unit_id=%s (marked for rebuild)",
+                        unit_id,
+                        exc_info=True,
+                    )
+                    get_metrics().inc("embed.index_sync_failed")
+                    get_metrics().inc("embed.index_sync_failed_sparse")
+                    _mark_index_repair("sparse", unit_id, exc)
+                    index_health.schedule_rebuild(store=store, embedder=embedder, cfg=cfg)
             publish_ms = (time.monotonic() - publish_t0) * 1000
             stage_timings = {
                 "encode_ms": round(encode_ms, 3),
@@ -718,16 +826,40 @@ def embed(
 def delete_unit(
     unit_id: str,
     store: VectorStore = Depends(get_vector_store),
+    embedder: Embedder = Depends(get_embedder),
+    cfg: Settings = Depends(get_settings),
 ) -> DeleteUnitResponse:
     """Delete vectors for unit; idempotent. Never fake success on failure."""
     uid = _require_unit_id(unit_id)
     try:
         with get_unit_locks().hold(uid):
             deleted_count = store.delete_by_unit(uid)
+            # R-10: a failed auxiliary-index delete leaves stale docs that keep
+            # matching; record a durable repair task instead of only warning.
             try:
                 get_lexical_index().delete_unit(uid)
-            except Exception:
-                logger.warning("lexical index delete failed unit_id=%s", uid, exc_info=True)
+                index_health.clear_repair("lexical", uid)
+            except Exception as exc:
+                logger.error(
+                    "lexical index delete failed unit_id=%s (marked for rebuild)",
+                    uid,
+                    exc_info=True,
+                )
+                get_metrics().inc("embed.index_sync_failed")
+                get_metrics().inc("embed.index_sync_failed_lexical")
+                _mark_index_repair("lexical", uid, exc)
+                index_health.schedule_rebuild(store=store, embedder=embedder, cfg=cfg)
+            try:
+                get_sparse_index().delete_unit(uid)
+                index_health.clear_repair("sparse", uid)
+            except Exception as exc:
+                logger.error(
+                    "sparse index delete failed unit_id=%s (marked for rebuild)", uid, exc_info=True
+                )
+                get_metrics().inc("embed.index_sync_failed")
+                get_metrics().inc("embed.index_sync_failed_sparse")
+                _mark_index_repair("sparse", uid, exc)
+                index_health.schedule_rebuild(store=store, embedder=embedder, cfg=cfg)
     except Exception as exc:
         logger.exception("delete unit failed unit_id=%s", uid)
         raise HTTPException(
@@ -739,4 +871,3 @@ def delete_unit(
             ),
         ) from exc
     return DeleteUnitResponse(deleted=True, deleted_count=deleted_count)
-

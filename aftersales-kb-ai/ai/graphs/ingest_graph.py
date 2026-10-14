@@ -22,8 +22,26 @@ from ai.ingest.mineru_client import MinerUClient, MinerUError
 from ai.ingest.quality import build_quality
 from ai.ingest.source import SourceFetchError, fetch_source_to_temp
 from ai.generate.vlm import VlmClient, VlmError, guess_mime, inject_captions_into_markdown
+from ai.media_refs import normalize_image_ref
 from core.trace import get_trace_id, set_trace_id
 from ai.generate.vlm_cache import get_caption_cache
+
+
+def _img_basename(path: str) -> str:
+    """Filename part of an image path, tolerating either slash style."""
+    return normalize_image_ref(path).rsplit("/", 1)[-1]
+
+
+def _md_image_refs(markdown: str) -> tuple[set[str], set[str]]:
+    """(full paths, basenames) of images referenced by the markdown."""
+    refs = set(re.findall(r"!\[[^\]]*\]\(([^)]+)\)", markdown or ""))
+    return refs, {_img_basename(p) for p in refs}
+
+
+def _is_md_referenced(rel: str, md_refs: set[str], md_bases: set[str]) -> bool:
+    """True when the markdown links this image (exact path or unique basename)."""
+    return bool(rel) and (rel in md_refs or _img_basename(rel) in md_bases)
+
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +164,9 @@ def build_ingest_graph(
                         )
                         text = path.read_text(encoding="utf-8", errors="replace")
                 else:
-                    raise IngestGraphError("file, markdown, or source_url is required", "BAD_SOURCE", 400)
+                    raise IngestGraphError(
+                        "file, markdown, or source_url is required", "BAD_SOURCE", 400
+                    )
                 images = _images_from_markdown(text)
 
             elif ft == "docx":
@@ -164,7 +184,9 @@ def build_ingest_graph(
                         )
                         raw = path.read_bytes()
                 if raw is None:
-                    raise IngestGraphError("file or source_url is required for docx", "BAD_SOURCE", 400)
+                    raise IngestGraphError(
+                        "file or source_url is required for docx", "BAD_SOURCE", 400
+                    )
                 with tempfile.TemporaryDirectory(prefix="kb_docx_") as tmp:
                     path = Path(tmp) / _safe_upload_name(
                         state.get("file_name") or state.get("source_name"), "upload.docx"
@@ -228,7 +250,9 @@ def build_ingest_graph(
                         raw = path.read_bytes()
                         fname = path.name
                 if raw is None:
-                    raise IngestGraphError("file or source_url is required for pdf", "BAD_SOURCE", 400)
+                    raise IngestGraphError(
+                        "file or source_url is required for pdf", "BAD_SOURCE", 400
+                    )
                 if not raw:
                     raise IngestGraphError("empty pdf upload", "EMPTY_PDF", 400)
                 on_progress("parse", 20, "mineru extract")
@@ -317,10 +341,19 @@ def build_ingest_graph(
         on_progress("vlm", 50, "describing images")
         limits = get_limits()
         captions: dict[str, str] = {}
+        # Only caption images the markdown actually references. MinerU returns some
+        # figures it never links in the markdown; those have nowhere to inject a
+        # caption, so a VLM call on them is pure cost and an unearned metric loss.
+        md_refs, md_bases = _md_image_refs(text)
         todo: list[dict] = []
         for img in images:
             rel = img.get("relative_path") or ""
             if rel not in image_bytes_map:
+                continue
+            if not _is_md_referenced(rel, md_refs, md_bases):
+                img["status"] = "skipped"
+                img["caption"] = None
+                metrics.inc("vlm.skip_unreferenced")
                 continue
             if len(todo) >= cfg.max_vlm_images:
                 img["status"] = "skipped"
@@ -359,7 +392,11 @@ def build_ingest_graph(
                 for fut in as_completed(futs):
                     img, cap, err = fut.result()
                     done_n += 1
-                    on_progress("vlm", 50 + int(30 * done_n / max(1, len(todo))), f"vlm {done_n}/{len(todo)}")
+                    on_progress(
+                        "vlm",
+                        50 + int(30 * done_n / max(1, len(todo))),
+                        f"vlm {done_n}/{len(todo)}",
+                    )
                     if cap:
                         img["status"] = "described"
                         img["caption"] = cap
@@ -374,9 +411,7 @@ def build_ingest_graph(
             "images": images,
             "text": text,
             "stage": "vlm",
-            "stage_timings": _merge_timings(
-                state, "vlm_ms", (time.monotonic() - vlm_t0) * 1000
-            ),
+            "stage_timings": _merge_timings(state, "vlm_ms", (time.monotonic() - vlm_t0) * 1000),
         }
 
     def chunk_and_quality(state: IngestState) -> IngestState:
@@ -397,7 +432,11 @@ def build_ingest_graph(
         chunk_objs = split_markdown(
             text,
             chunk_size=state.get("chunk_size") or cfg.chunk_size,
-            chunk_overlap=state.get("chunk_overlap") if state.get("chunk_overlap") is not None else cfg.chunk_overlap,
+            chunk_overlap=state.get("chunk_overlap")
+            if state.get("chunk_overlap") is not None
+            else cfg.chunk_overlap,
+            table_row_chunk=bool(getattr(cfg, "table_row_chunk", True)),
+            table_row_group=int(getattr(cfg, "table_row_group", 3)),
         )
         chunks = [
             {"chunk_index": c.chunk_index, "content": c.content, "heading_path": c.heading_path}

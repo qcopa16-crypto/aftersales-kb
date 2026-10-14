@@ -8,6 +8,8 @@ pymilvus>=2.4
 python-docx>=1.1
 langgraph>=0.2
 langchain-core>=0.3
+# Session memory (optional at runtime: import is wrapped in try/except)
+pymongo>=4.6
 
 # Local embedding (optional, heavy):
 # FlagEmbedding

@@ -312,9 +312,7 @@ def compare_baseline(prev_summary: dict[str, Any], cur_summary: dict[str, Any]) 
         if p is not None and c is not None:
             out[f"{key}_delta"] = round(float(c) - float(p), 2)
     if out.get("positive_rate_prev") is not None and out.get("positive_rate_cur") is not None:
-        out["positive_rate_delta"] = round(
-            out["positive_rate_cur"] - out["positive_rate_prev"], 2
-        )
+        out["positive_rate_delta"] = round(out["positive_rate_cur"] - out["positive_rate_prev"], 2)
     return out
 
 

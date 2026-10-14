@@ -1,0 +1,280 @@
+/**
+ * 设计 token — Linear 风格：冷中性灰 + 单一克制强调色、发丝级边框、极强层级纪律。
+ * 落地方式：覆盖 Element Plus CSS 变量，不重写组件。
+ */
+
+:root {
+  /* ---- 品牌主色：深靛蓝（覆盖 Element Plus primary 色阶）---- */
+  --brand-500: #3e63dd;
+  --brand-600: #3457c9;
+  --brand-700: #2a46a6;
+
+  --el-color-primary: var(--brand-500);
+  --el-color-primary-light-3: #6b88e6;
+  --el-color-primary-light-5: #9aaeef;
+  --el-color-primary-light-7: #c5d0f6;
+  --el-color-primary-light-8: #dbe2fa;
+  --el-color-primary-light-9: #eef1fd;
+  --el-color-primary-dark-2: var(--brand-600);
+
+  /* ---- 中性色 ---- */
+  --color-bg: #ffffff;
+  --color-surface: #f7f8fa;
+  --color-surface-hover: #f0f1f4;
+  --color-border: #e8eaed;
+  --color-border-strong: #d8dade;
+  --color-text: #1f2328;
+  --color-text-secondary: #5b6470;
+  --color-text-tertiary: #9aa1ac;
+
+  /* ---- 语义色（仅用于状态）---- */
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+  --color-info: #3b82f6;
+
+  /* ---- 入库阶段色 ---- */
+  --stage-queued: #94a3b8;
+  --stage-running: #3b82f6;
+  --stage-review: #f59e0b;
+  --stage-ready: #10b981;
+  --stage-failed: #ef4444;
+
+  /* ---- 排版 ---- */
+  --font-family:
+    'Inter', 'PingFang SC', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, sans-serif;
+  --font-family-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+
+  /* ---- 行高（统一行距：标题收紧 / 正文放松 / 表格居中）---- */
+  --line-height-tight: 1.3;
+  --line-height-base: 1.6;
+  --line-height-table: 1.5;
+
+  /* ---- 间距（8px 栅格）---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  /* ---- 图标尺寸（统一三档，避免各处随手写大小）---- */
+  --icon-size-sm: 14px;
+  --icon-size: 16px;
+  --icon-size-lg: 20px;
+
+  /* ---- Element Plus 排版/圆角/密度覆盖 ---- */
+  --el-font-family: var(--font-family);
+  --el-font-size-base: 14px;
+  --el-text-color-primary: var(--color-text);
+  --el-text-color-regular: var(--color-text-secondary);
+  --el-text-color-secondary: var(--color-text-tertiary);
+  --el-text-color-placeholder: var(--color-text-tertiary);
+
+  --el-border-color: var(--color-border);
+  --el-border-color-light: var(--color-border);
+  --el-border-color-lighter: var(--color-border);
+  --el-border-color-extra-light: var(--color-border);
+  --el-fill-color-blank: var(--color-bg);
+  --el-fill-color-light: var(--color-surface);
+  --el-bg-color: var(--color-bg);
+  --el-bg-color-page: var(--color-surface);
+
+  /* 圆角：base 4px、卡片 6px、禁止胶囊 */
+  --el-border-radius-base: 4px;
+  --el-border-radius-small: 4px;
+  --el-border-radius-round: 4px;
+  --el-border-radius-circle: 4px;
+
+  /* 阴影：只用一档 */
+  --el-box-shadow-light: 0 1px 2px rgba(31, 35, 40, 0.06);
+  --el-box-shadow: 0 1px 3px rgba(31, 35, 40, 0.08);
+  --el-box-shadow-lighter: 0 1px 2px rgba(31, 35, 40, 0.05);
+
+  --el-color-success: var(--color-success);
+  --el-color-warning: var(--color-warning);
+  --el-color-danger: var(--color-danger);
+  --el-color-error: var(--color-danger);
+  --el-color-info: var(--color-text-tertiary);
+
+  /* 表格密度 */
+  --el-table-row-height: 38px;
+  --el-table-border-color: var(--color-border);
+  --el-table-header-bg-color: var(--color-surface);
+  --el-table-header-text-color: var(--color-text-secondary);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-family);
+  font-size: 14px;
+  line-height: var(--line-height-base);
+  color: var(--color-text);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 标题收紧行距，与正文形成层级；不再靠字号堆叠 */
+h1,
+h2,
+h3,
+h4,
+h5 {
+  line-height: var(--line-height-tight);
+  margin: 0;
+}
+
+/* 图标统一垂直居中，避免与文字基线错位 */
+.el-icon {
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.el-button .el-icon,
+.el-tag .el-icon {
+  vertical-align: middle;
+}
+
+/* 表格与表单控件统一行距，避免各处疏密不一 */
+.el-table,
+.el-table .cell,
+.el-form-item__label,
+.el-form-item__content,
+.el-descriptions__cell {
+  line-height: var(--line-height-table);
+}
+
+a {
+  color: var(--brand-500);
+  text-decoration: none;
+}
+
+/* 通用工具类 */
+.text-secondary {
+  color: var(--color-text-secondary);
+}
+.text-tertiary {
+  color: var(--color-text-tertiary);
+}
+.text-mono {
+  font-family: var(--font-family-mono);
+}
+.text-sm {
+  font-size: 12px;
+}
+.text-md {
+  font-size: 13px;
+}
+.mt-8 {
+  margin-top: 8px;
+}
+.mt-16 {
+  margin-top: 16px;
+}
+.mb-8 {
+  margin-bottom: 8px;
+}
+.mb-16 {
+  margin-bottom: 16px;
+}
+.flex {
+  display: flex;
+}
+.flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.flex-center {
+  display: flex;
+  align-items: center;
+}
+.gap-8 {
+  gap: 8px;
+}
+.gap-16 {
+  gap: 16px;
+}
+.flex-1 {
+  flex: 1;
+}
+.w-full {
+  width: 100%;
+}
+
+/* 卡片：靠边框与留白分层，仅一档阴影 */
+.kb-card {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: var(--space-4);
+}
+
+.kb-card--flat {
+  box-shadow: none;
+}
+
+/* 面板标题：全站统一（字号/字重/行距/下间距） */
+.panel-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: var(--line-height-tight);
+  color: var(--color-text);
+  margin-bottom: var(--space-3);
+}
+
+/* 指标卡：数值用等宽字体对齐，标签与数值行距一致 */
+.metric-card__label {
+  font-size: 12px;
+  line-height: var(--line-height-tight);
+  color: var(--color-text-tertiary);
+}
+.metric-card__value {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: var(--line-height-tight);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.metric-card__suffix {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  margin-left: 4px;
+}
+
+/* Element Plus 细节收敛 */
+.el-card {
+  border-radius: 6px;
+  border-color: var(--color-border);
+  box-shadow: none;
+}
+.el-button {
+  font-weight: 500;
+}
+.el-tag {
+  border-radius: 4px;
+}
+.el-message {
+  border-radius: 6px;
+}
+.el-drawer__header {
+  margin-bottom: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--color-border);
+}
+.el-dialog {
+  border-radius: 6px;
+}

@@ -1,0 +1,23 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:aftersales_kb;MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+      schema-locations: classpath:schema-h2.sql
+      data-locations: classpath:data-h2.sql
+  h2:
+    console:
+      # 默认关闭；本地需要排查时显式设置 H2_CONSOLE_ENABLED=true 再启动
+      enabled: ${H2_CONSOLE_ENABLED:false}
+
+jwt:
+  # 仅开发 profile 使用的内置默认密钥；生产必须通过 JWT_SECRET 覆盖（见 StartupSecurityValidator）
+  secret: ${JWT_SECRET:__REDACTED_DEV_SECRET__}
+
+ai:
+  internal-token: ${AI_INTERNAL_TOKEN:change-me}

@@ -74,7 +74,9 @@ class TaskStoreBackend(Protocol):
 
 
 class TaskStore:
-    def __init__(self, max_tasks: int = 500, lease_sec: float = 120.0, reap_on_read: bool = True) -> None:
+    def __init__(
+        self, max_tasks: int = 500, lease_sec: float = 120.0, reap_on_read: bool = True
+    ) -> None:
         self._lock = threading.Lock()
         self._tasks: dict[str, IngestTask] = {}
         self._max = max_tasks
@@ -94,7 +96,9 @@ class TaskStore:
         )
         with self._lock:
             if len(self._tasks) >= self._max:
-                finished = [t for t in self._tasks.values() if t.status in {"done", "failed", "stale"}]
+                finished = [
+                    t for t in self._tasks.values() if t.status in {"done", "failed", "stale"}
+                ]
                 finished.sort(key=lambda t: t.updated_at)
                 for old in finished[: max(1, len(finished) // 2)]:
                     self._tasks.pop(old.task_id, None)
@@ -112,7 +116,9 @@ class TaskStore:
                 task.error_code = "TASK_STALE"
                 task.error_message = f"lease expired after {self._lease_sec}s"
                 task.touch()
-                logger.warning("task marked stale task_id=%s unit_id=%s", task.task_id, task.unit_id)
+                logger.warning(
+                    "task marked stale task_id=%s unit_id=%s", task.task_id, task.unit_id
+                )
 
     def get(self, task_id: str) -> IngestTask | None:
         with self._lock:

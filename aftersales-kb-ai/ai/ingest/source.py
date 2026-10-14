@@ -62,9 +62,7 @@ def _resolve_public_ip(host: str, port: int) -> str:
             return ip
     # All resolved addresses private/loopback.
     sample = infos[0][4][0]
-    raise SourceFetchError(
-        f"source_url resolves to private IP: {sample}", "SOURCE_SSRF_BLOCKED"
-    )
+    raise SourceFetchError(f"source_url resolves to private IP: {sample}", "SOURCE_SSRF_BLOCKED")
 
 
 def _validate_url(url: str, *, allow_private_hosts: bool = False) -> str:

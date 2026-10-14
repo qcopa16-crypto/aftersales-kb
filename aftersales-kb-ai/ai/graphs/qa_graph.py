@@ -37,12 +37,16 @@ def build_qa_graph(
         try:
             from core.config import get_settings
             from ai.retrieve.lexical import get_lexical_index
+            from ai.retrieve.sparse import get_sparse_index
+            from ai.retrieve.reranker import get_reranker
+            from ai.retrieve.query_rewrite import get_query_rewriter
             from ai.retrieve.pipeline import (
                 RetrieveError,
                 RetrieveRequestView,
                 run_retrieve_pipeline,
             )
 
+            cfg = get_settings()
             result = run_retrieve_pipeline(
                 request=RetrieveRequestView(
                     question=state["question"],
@@ -51,7 +55,10 @@ def build_qa_graph(
                 embedder=embedder,
                 store=store,
                 lexical=get_lexical_index(),
-                cfg=get_settings(),
+                cfg=cfg,
+                sparse=get_sparse_index(),
+                reranker=get_reranker(cfg),
+                query_rewriter=get_query_rewriter(cfg, llm),
             )
         except RetrieveError as exc:
             raise QaGraphError(str(exc), exc.error_code) from exc
@@ -62,10 +69,19 @@ def build_qa_graph(
     def node_generate(state: QaState) -> QaState:
         contexts = state.get("contexts") or []
         if not contexts and state.get("chunks"):
-            # build contexts from retrieved chunks (caller may filter before generate)
+            # caller may have pre-filtered; pack (dedup + budget + [n] citation order)
+            from core.config import get_settings
+            from ai.generate.context_pack import pack_contexts
+
+            cfg = get_settings()
+            packed = pack_contexts(
+                state["chunks"],
+                max_chars=int(getattr(cfg, "generate_pack_max_chars", 6000)),
+                per_chunk_max=int(getattr(cfg, "generate_pack_per_chunk_max", 1500)),
+                jaccard_threshold=float(getattr(cfg, "generate_pack_jaccard", 0.85)),
+            )
             contexts = [
-                {"unit_id": c["unit_id"], "title": "", "content": c["content"]}
-                for c in state["chunks"]
+                {"unit_id": p.unit_id, "title": p.title, "content": p.content} for p in packed
             ]
         deltas: list[str] = []
         try:

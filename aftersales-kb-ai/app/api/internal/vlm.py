@@ -1,4 +1,5 @@
 """VLM /internal routes."""
+
 from __future__ import annotations
 
 import logging
@@ -16,6 +17,7 @@ from app.api.internal._common import _max_msg
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["internal-vlm"])
+
 
 @router.post("/vlm/describe", response_model=VlmDescribeResponse)
 async def vlm_describe(
@@ -47,4 +49,3 @@ async def vlm_describe(
             ),
         ) from exc
     return VlmDescribeResponse(caption=caption, model=cfg.vlm_model)
-

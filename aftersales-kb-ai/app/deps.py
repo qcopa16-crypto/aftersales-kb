@@ -2,7 +2,6 @@ from functools import lru_cache
 
 from core.config import get_settings
 from ai.embed.embedder import Embedder, create_embedder
-from ai.retrieve.lexical import LexicalIndex, get_lexical_index
 from ai.generate.llm import LlmClient
 from ai.ingest.mineru_client import MinerUClient
 from ai.retrieve.store import VectorStore, create_vector_store
@@ -34,7 +33,3 @@ def get_vlm() -> VlmClient:
 @lru_cache
 def get_llm() -> LlmClient:
     return LlmClient(get_settings())
-
-
-def get_lexical_index_dep() -> LexicalIndex:
-    return get_lexical_index()

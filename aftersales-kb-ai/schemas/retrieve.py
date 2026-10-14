@@ -1,4 +1,5 @@
 """Retrieve /internal contract DTOs."""
+
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -31,6 +32,10 @@ class RetrieveRequest(BaseModel):
     overfetch: int | None = Field(default=None, ge=1, le=200)
     enable_rerank: bool | None = None
     enable_hybrid: bool | None = None
+    # 会话记忆（检索期指代消解）。owner_id 是 Java 下发的不透明分区键，AI 只当 key、绝不解释。
+    session_id: str = ""
+    owner_id: str = ""
+    enable_session_rewrite: bool = False
 
 
 class RetrievedChunk(BaseModel):
@@ -42,8 +47,9 @@ class RetrievedChunk(BaseModel):
     heading_path: list[str] = Field(default_factory=list)
     score_dense: float | None = None
     score_lexical: float | None = None
+    score_sparse: float | None = None
     score_fused: float | None = None
-    retrieval_paths: list[Literal["dense", "lexical"]] = Field(default_factory=list)
+    retrieval_paths: list[Literal["dense", "lexical", "sparse"]] = Field(default_factory=list)
 
 
 class RetrieveResponse(BaseModel):

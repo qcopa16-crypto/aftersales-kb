@@ -1,14 +1,16 @@
-"""LangGraph retrieve graph: hybrid dense+lexical pipeline nodes.
+"""LangGraph retrieve graph: hybrid dense+sparse+lexical pipeline nodes.
 
 Production HTTP /internal/retrieve uses the flat pipeline
 (`run_retrieve_pipeline` via `run_retrieve`) for bulkhead/QPS/stage metrics
 and multi-replica controls. This graph is a debug/composition path; nodes
-must stay aligned on ACL fail-closed + unit_ids cap + multi_replica dense-only.
+reuse the same `fuse_hybrid_hits` / `finalize_hits` helpers as the flat
+pipeline so three-way fusion, adaptive budget and dedup stay aligned.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -19,15 +21,17 @@ from ai.retrieve.lexical import LexicalIndex, get_lexical_index
 from ai.retrieve.pipeline import (
     RetrieveError,
     RetrieveRequestView,
+    _search_store_with_resilience,
     build_acl_filter,
-    fuse_rrf,
+    finalize_hits,
+    fuse_hybrid_hits,
+    index_usable,
     normalize_question,
     pack_response,
     post_filter_acl,
-    apply_max_per_unit,
-    rule_rerank,
     run_retrieve_pipeline,
 )
+from ai.retrieve.sparse import SparseIndex, get_sparse_index
 from ai.retrieve.store import SearchFilter, VectorStore
 
 logger = logging.getLogger(__name__)
@@ -39,8 +43,12 @@ def build_retrieve_graph(
     store: VectorStore,
     lexical: LexicalIndex | None = None,
     cfg: Settings | None = None,
+    sparse: SparseIndex | None = None,
+    reranker: Any = None,
+    query_rewriter: Any = None,
 ):
     index = lexical or get_lexical_index()
+    sparse_index = sparse or get_sparse_index()
     settings = cfg or get_settings()
 
     def _resolve_hybrid(state: RetrieveState) -> bool:
@@ -54,6 +62,20 @@ def build_retrieve_graph(
 
     def node_normalize(state: RetrieveState) -> RetrieveState:
         question = normalize_question(state["question"], settings.retrieve_max_question_chars)
+        # Extra-recall mode keeps the ORIGINAL question as the main path (the
+        # rewritten query becomes an extra RRF ranking in the flat pipeline). This
+        # debug graph does not implement that extra path, so it must not replace
+        # the question either — otherwise it would diverge from the flat pipeline.
+        if query_rewriter is not None and not getattr(
+            settings, "retrieve_query_rewrite_extra_path", False
+        ):
+            from ai.retrieve.query_rewrite import rewrite_question_cached
+
+            question = rewrite_question_cached(
+                question,
+                rewriter=query_rewriter,
+                max_size=int(getattr(settings, "retrieve_query_rewrite_cache_max", 0) or 0),
+            )
         return {
             "question": question,
             "hybrid": _resolve_hybrid(state),
@@ -89,7 +111,30 @@ def build_retrieve_graph(
         overfetch = max(top_k, int(overfetch))
         try:
             qvec = embedder.encode([state["question"]])[0]
-            hits = store.search(qvec, top_k=overfetch, filter=flt)
+            # R-01: go through the same resilient wrapper as the flat pipeline so
+            # this debug/composition node also gets the real RPC deadline
+            # (timeout_sec = min(store timeout, remaining budget)) and the bounded
+            # store pool — never a raw, unbounded store.search.
+            from core.circuit import get_circuits, get_metrics
+
+            budget = float(settings.retrieve_overall_timeout_sec or 0)
+            deadline = (time.monotonic() + budget) if budget > 0 else None
+            hits, _ = _search_store_with_resilience(
+                store=store,
+                qvec=qvec,
+                top_k=overfetch,
+                flt=flt,
+                cfg=settings,
+                circuits=get_circuits(
+                    settings.circuit_failure_threshold, settings.circuit_cooldown_sec
+                ),
+                metrics=get_metrics(),
+                deadline=deadline,
+            )
+        except RetrieveError:
+            # Preserve the specific error code/status (503 circuit-open / 504
+            # timeout / 503 overloaded) instead of flattening to a generic 500.
+            raise
         except Exception as exc:
             raise RetrieveError(f"retrieve failed: {exc}", "RETRIEVE_FAILED", 500) from exc
         return {"dense_hits": hits, "stage": "dense"}  # type: ignore[typeddict-item]
@@ -106,8 +151,10 @@ def build_retrieve_graph(
         )
         overfetch = max(top_k, int(overfetch))
         try:
-            if index.doc_count() == 0:
-                index.sync_from_store(store, limit=int(settings.retrieve_lexical_max_docs or 0) or None)
+            if not index_usable(index):
+                index.sync_from_store(
+                    store, limit=int(settings.retrieve_lexical_max_docs or 0) or None
+                )
             hits = index.search(
                 state["question"],
                 top_k=overfetch,
@@ -125,58 +172,80 @@ def build_retrieve_graph(
             raise RetrieveError(f"retrieve failed: {exc}", "RETRIEVE_FAILED", 500) from exc
         return {"lexical_hits": hits, "stage": "lexical"}  # type: ignore[typeddict-item]
 
-    def node_fuse(state: RetrieveState) -> RetrieveState:
-        from ai.retrieve.pipeline import FuseHit, _hit_key
+    def node_sparse(state: RetrieveState) -> RetrieveState:
+        hybrid_on = _resolve_hybrid(state)
+        use_sparse = bool(getattr(settings, "retrieve_sparse_enabled", False)) and getattr(
+            embedder, "supports_sparse", False
+        )
+        if not hybrid_on or not use_sparse:
+            return {"sparse_hits": [], "stage": "sparse_skip"}  # type: ignore[typeddict-item]
+        flt: SearchFilter | None = state.get("search_filter")  # type: ignore[assignment]
+        top_k = int(state.get("top_k") or settings.retrieve_top_k_default)
+        overfetch = state.get("overfetch") or min(
+            top_k * settings.retrieve_overfetch_factor,
+            settings.retrieve_overfetch_max,
+        )
+        overfetch = max(top_k, int(overfetch))
+        try:
+            sparse_usable = index_usable(sparse_index)
+            skip_when_not_ready = bool(
+                getattr(settings, "retrieve_sparse_skip_when_not_ready", True)
+            )
+            sync_in_request = bool(getattr(settings, "retrieve_sparse_sync_in_request", False))
+            if not sparse_usable and (sync_in_request or not skip_when_not_ready):
+                # Mirror the flat pipeline: opt-in bounded in-request sync only.
+                from ai.retrieve.pipeline import _sync_sparse_from_store
+                from core.circuit import get_circuits, get_metrics
 
-        # Reuse packing logic via fused helper
+                sync_timeout = float(getattr(settings, "retrieve_sparse_sync_timeout_sec", 0) or 0)
+                if sync_timeout <= 0:
+                    sync_timeout = float(settings.retrieve_store_timeout_sec or 0)
+                _sync_sparse_from_store(
+                    sparse=sparse_index,
+                    store=store,
+                    embedder=embedder,
+                    limit=int(getattr(settings, "retrieve_sparse_max_docs", 0) or 0) or None,
+                    timeout_sec=sync_timeout,
+                    cfg=settings,
+                    circuits=get_circuits(
+                        settings.circuit_failure_threshold, settings.circuit_cooldown_sec
+                    ),
+                    metrics=get_metrics(),
+                )
+                sparse_usable = index_usable(sparse_index)
+            if not sparse_usable:
+                return {"sparse_hits": [], "stage": "sparse_not_ready"}  # type: ignore[typeddict-item]
+            q_sparse = embedder.encode_sparse([state["question"]])[0]
+            hits = (
+                sparse_index.search(
+                    q_sparse,
+                    top_k=overfetch,
+                    filter=flt,
+                    max_docs=int(getattr(settings, "retrieve_sparse_max_docs", 0) or 0) or None,
+                )
+                if q_sparse
+                else []
+            )
+        except Exception as exc:
+            logger.warning("sparse degraded: %s", exc)
+            return {"sparse_hits": [], "stage": "sparse_degraded"}  # type: ignore[typeddict-item]
+        return {"sparse_hits": hits, "stage": "sparse"}  # type: ignore[typeddict-item]
+
+    def node_fuse(state: RetrieveState) -> RetrieveState:
         dense_hits = state.get("dense_hits") or []
         lexical_hits = state.get("lexical_hits") or []
+        sparse_hits = state.get("sparse_hits") or []
         hybrid_on = _resolve_hybrid(state)
-
-        by_key: dict[str, FuseHit] = {}
-
-        def upsert(row: dict, path: str, score: float) -> str:
-            cid = str(row.get("id") or row.get("chunk_id") or "")
-            unit = str(row.get("unit_id") or "")
-            ver = str(row.get("version_id") or "")
-            key = _hit_key(unit, cid, ver)
-            hit = by_key.get(key)
-            if hit is None:
-                hit = FuseHit(
-                    chunk_id=cid,
-                    unit_id=unit,
-                    chunk_index=int(row.get("chunk_index") or 0),
-                    content=str(row.get("content") or ""),
-                    version_id=ver,
-                    heading_path=list(row.get("heading_path") or []),
-                    acl_department=str(row.get("acl_department") or ""),
-                    acl_classification=str(row.get("acl_classification") or ""),
-                )
-                by_key[key] = hit
-            if path == "dense":
-                hit.score_dense = float(score)
-                if "dense" not in hit.retrieval_paths:
-                    hit.retrieval_paths.append("dense")
-            else:
-                hit.score_lexical = float(score)
-                if "lexical" not in hit.retrieval_paths:
-                    hit.retrieval_paths.append("lexical")
-            return key
-
-        dense_ranking = [upsert(r, "dense", float(r.get("score") or 0.0)) for r in dense_hits]
-        lexical_ranking = []
-        if hybrid_on:
-            lexical_ranking = [upsert(r, "lexical", float(r.get("score") or 0.0)) for r in lexical_hits]
-        rankings = [dense_ranking] + ([lexical_ranking] if hybrid_on else [])
-        weights = [1.0]
-        if len(rankings) > 1:
-            weights.append(float(getattr(settings, "retrieve_lexical_rrf_weight", 0.35) or 0.35))
-        scores = fuse_rrf(rankings, k=settings.retrieve_hybrid_rrf_k, weights=weights)
-        fused_list = []
-        for key, hit in by_key.items():
-            hit.score_fused = scores.get(key, 0.0)
-            fused_list.append(hit)
-        fused_list.sort(key=lambda h: h.score_fused, reverse=True)
+        fused_list = fuse_hybrid_hits(
+            dense_hits=dense_hits,
+            lexical_hits=lexical_hits,
+            sparse_hits=sparse_hits,
+            use_lexical=hybrid_on,
+            use_sparse=bool(sparse_hits),
+            lexical_weight=float(getattr(settings, "retrieve_lexical_rrf_weight", 0.35) or 0.35),
+            sparse_weight=float(getattr(settings, "retrieve_sparse_rrf_weight", 0.3) or 0.3),
+            rrf_k=int(getattr(settings, "retrieve_hybrid_rrf_k", 60) or 60),
+        )
         return {"fused_hits": fused_list, "hybrid": bool(hybrid_on), "stage": "fuse"}  # type: ignore[typeddict-item]
 
     def node_post_filter(state: RetrieveState) -> RetrieveState:
@@ -205,10 +274,15 @@ def build_retrieve_graph(
         enable_rerank = state.get("enable_rerank")
         if enable_rerank is None:
             enable_rerank = settings.retrieve_enable_rerank
-        fused_list = apply_max_per_unit(fused_list, settings.retrieve_max_per_unit)
-        if enable_rerank:
-            fused_list = rule_rerank(fused_list, state["question"])
-            fused_list = apply_max_per_unit(fused_list, settings.retrieve_max_per_unit)
+        fused_list = finalize_hits(
+            fused_list,
+            question=state["question"],
+            cfg=settings,
+            top_k=top_k,
+            enable_rerank=bool(enable_rerank),
+            embedder=embedder,
+            reranker=reranker,
+        )
         chunks = pack_response(fused_list, top_k)
         return {"chunks": chunks, "stage": "pack"}  # type: ignore[typeddict-item]
 
@@ -217,6 +291,7 @@ def build_retrieve_graph(
     g.add_node("acl", node_acl)
     g.add_node("embed_dense", node_embed_dense)
     g.add_node("lexical", node_lexical)
+    g.add_node("sparse", node_sparse)
     g.add_node("fuse", node_fuse)
     g.add_node("post_filter", node_post_filter)
     g.add_node("rerank_pack", node_rerank_pack)
@@ -224,7 +299,8 @@ def build_retrieve_graph(
     g.add_edge("normalize", "acl")
     g.add_edge("acl", "embed_dense")
     g.add_edge("embed_dense", "lexical")
-    g.add_edge("lexical", "fuse")
+    g.add_edge("lexical", "sparse")
+    g.add_edge("sparse", "fuse")
     g.add_edge("fuse", "post_filter")
     g.add_edge("post_filter", "rerank_pack")
     g.add_edge("rerank_pack", END)
@@ -238,12 +314,19 @@ def run_retrieve(
     store: VectorStore,
     lexical: LexicalIndex | None = None,
     cfg: Settings | None = None,
+    sparse: SparseIndex | None = None,
+    reranker: Any = None,
+    query_rewriter: Any = None,
 ) -> dict:
     """API-facing entry: uses the flat pipeline for consistent metrics/degrade handling."""
+    settings = cfg or get_settings()
     return run_retrieve_pipeline(
         request=request,
         embedder=embedder,
         store=store,
         lexical=lexical or get_lexical_index(),
-        cfg=cfg or get_settings(),
+        cfg=settings,
+        sparse=sparse or get_sparse_index(),
+        reranker=reranker,
+        query_rewriter=query_rewriter,
     )

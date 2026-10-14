@@ -1,6 +1,12 @@
 # =========================================================
-# 上传策略：只保留 README、业务/AI 源码、金标数据、.env.example
-# 文档（docs/DESIGN/规范）、测评报告（samples/）、运行时（.data/）一律不传
+# 分发策略：默认全忽略，再按白名单逐项放行（git last-match-wins）
+# 放行：README、业务/AI 源码、金标数据、CI 工作流、部署工件
+#       （Dockerfile / docker-compose.yml / .dockerignore / deploy/）、
+#       生产必需文档（docs/** 架构·API·迁移·配置·运维·安全、DESIGN.md、
+#       代码设计规范.md、aftersales-kb-ai/docs/**）及 aftersales-kb-ai/.env.example 模板。
+# 不传：deliverables/ 报告、评测输出（samples/）、真实上传语料（data/uploads、uploads）、
+#       运行时/缓存（.data/、target/、__pycache__）、工作区记忆（.workbuddy-ai/、.codebuddy/）、
+#       演示大文件（docs/demo-knowledge/product/）。
 # =========================================================
 
 # ----- 默认全部忽略，再白名单放行 -----
@@ -10,10 +16,28 @@
 !README.md
 !.gitignore
 
+# ----- CI 配置（GitHub Actions）：必须入库，否则 workflow 不生效 -----
+!.github/
+!.github/**
+
 # ----- Java 业务代码 -----
 !pom.xml
 !src/
 !src/**
+
+# ----- Maven Wrapper（M4）：mvnw / .mvn 必须入库，保证克隆即可构建 -----
+!mvnw
+!mvnw.cmd
+!.mvn/
+!.mvn/**
+
+# ----- 前端工程（Vue3 + Vite）：源码入库，node_modules/dist 由 frontend/.gitignore 排除 -----
+!frontend/
+!frontend/**
+
+# ----- 工程脚本（E2E / 诊断 / 种子 / 代理校验）-----
+!scripts/
+!scripts/**
 
 # ----- AI 服务代码 -----
 !aftersales-kb-ai/
@@ -40,11 +64,23 @@
 !aftersales-kb-ai/scripts/data/
 !aftersales-kb-ai/scripts/data/**
 
+# 备份文件不入库：金标/门禁的 .bak* 只在本地保留
+aftersales-kb-ai/scripts/data/*.bak*
+
 # ----- 强制排除：密钥 / 环境 / 缓存 / 报告 / 文档 / 大样例 -----
 .env
 .env.local
 *.env
 aftersales-kb-ai/.env
+# 环境变体与密钥材料（防止文件名绕过：.env.bak / .env.prod / *.pem / *.key / id_rsa*）
+.env.bak
+.env.prod
+.env.*.bak
+*.pem
+*.key
+id_rsa*
+# 重新放行模板（last-match-wins：必须位于上面的排除规则之后）
+!aftersales-kb-ai/.env.example
 .venv/
 venv/
 aftersales-kb-ai/.venv/
@@ -83,3 +119,48 @@ research/
 # OS
 Thumbs.db
 .DS_Store
+
+# =========================================================
+# R-01 生产交付工件：镜像 / 编排 / 部署配置必须入库
+# ⚠️ 以下 allowlist 必须位于上面所有排除规则之后（git last-match-wins）
+# =========================================================
+!Dockerfile
+!docker-compose.yml
+!.dockerignore
+!deploy/
+!deploy/**
+!aftersales-kb-ai/Dockerfile
+# deploy/ 放行后仍需排除其中的 secret；部署变量模板是 deploy/compose.env.example（可入库），
+# deploy/ 下任何 .env / .env.* 一律排除（含 .env.example，避免与模板命名混淆）。
+deploy/.env
+deploy/.env.*
+deploy/**/.env
+deploy/**/.env.*
+
+# =========================================================
+# R-05 生产必需文档 allowlist：只放行产品/运维/契约文档；
+# 仍强制排除 deliverables/、评测输出（samples/）、上传目录（data/uploads、uploads）、
+# .data/、.workbuddy-ai/、.codebuddy/ 等一次性产物与运行时数据。
+# ⚠️ 同样必须位于上面 `docs/`、`DESIGN.md`、`代码设计规范.md`、`aftersales-kb-ai/docs/`
+#    等排除规则之后，否则不生效。
+# =========================================================
+!docs/
+!docs/**
+!DESIGN.md
+!代码设计规范.md
+!aftersales-kb-ai/docs/
+!aftersales-kb-ai/docs/**
+# 演示知识中的产品手册 PDF 体积大，不随代码分发（与 README「安全与仓库约定」一致）；
+# 该规则必须位于 `!docs/**` 之后，才能覆盖上面放行。
+docs/demo-knowledge/product/
+
+# 追加到 .gitignore 末尾（必须在所有 !allowlist 之后）
+*.log
+*.out
+hs_err_pid*
+*.hprof
+*.class
+*.bak
+.DS_Store
+Thumbs.db
+__pycache__/

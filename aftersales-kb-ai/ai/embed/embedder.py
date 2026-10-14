@@ -35,6 +35,15 @@ class Embedder(ABC):
     @abstractmethod
     def encode(self, texts: list[str]) -> list[list[float]]: ...
 
+    @property
+    def supports_sparse(self) -> bool:
+        """True when the backend can emit term-level sparse weights."""
+        return False
+
+    def encode_sparse(self, texts: list[str]) -> list[dict[str, float]]:
+        """Sparse term→weight vectors. Default: empty (sparse path disabled)."""
+        return [{} for _ in texts]
+
 
 class FakeEmbedder(Embedder):
     """Deterministic hash embedding for tests / offline smoke. Not for production quality."""
@@ -62,7 +71,9 @@ class FakeEmbedder(Embedder):
 
 
 class CloudEmbedder(Embedder):
-    def __init__(self, base: str, api_key: str, model: str, dim: int, timeout: float = 60.0) -> None:
+    def __init__(
+        self, base: str, api_key: str, model: str, dim: int, timeout: float = 60.0
+    ) -> None:
         self._base = base.rstrip("/")
         self._key = api_key
         self._model = model
@@ -93,7 +104,9 @@ class CloudEmbedder(Embedder):
             code = exc.response.status_code
             if 400 <= code < 500 and code != 429:
                 # Client faults are permanent; do not amplify with retries.
-                raise EmbedError(f"embed HTTP {code}", "EMBED_CLIENT_ERROR", status_code=code) from exc
+                raise EmbedError(
+                    f"embed HTTP {code}", "EMBED_CLIENT_ERROR", status_code=code
+                ) from exc
             # 5xx/429 become retryable via error_code/status_code classification.
             raise EmbedError(f"embed HTTP {code}", "EMBED_FAILED", status_code=code) from exc
         except httpx.HTTPError as exc:
@@ -139,8 +152,28 @@ class LocalBgeEmbedder(Embedder):
         vectors: list[list[float]] = [list(map(float, v)) for v in emb["dense_vecs"]]
         for i, vec in enumerate(vectors):
             if len(vec) != self._dim:
-                raise RuntimeError(f"embedding dim mismatch at {i}: got {len(vec)}, expect {self._dim}")
+                raise RuntimeError(
+                    f"embedding dim mismatch at {i}: got {len(vec)}, expect {self._dim}"
+                )
         return vectors
+
+    @property
+    def supports_sparse(self) -> bool:
+        return True
+
+    def encode_sparse(self, texts: list[str]) -> list[dict[str, float]]:
+        """BGE-M3 lexical_weights (term→weight) for process-local sparse retrieval."""
+        if not texts:
+            return []
+        emb = self._model.encode(
+            texts,
+            batch_size=8,
+            max_length=8192,
+            return_dense=False,
+            return_sparse=True,
+            return_colbert_vecs=False,
+        )
+        return [dict(w) for w in emb["lexical_weights"]]
 
 
 def create_embedder(cfg: Settings) -> Embedder:

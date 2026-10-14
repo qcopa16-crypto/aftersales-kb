@@ -1,0 +1,54 @@
+spring:
+  datasource:
+    # 凭据改由环境变量注入（安全审计 S1 / F-007）：禁止把真实账号密码写入仓库。
+    # 启动前必须提供 MYSQL_URL / MYSQL_USER / MYSQL_PASSWORD，否则 datasource 无法初始化。
+    # useSSL=false：内网自签证书环境下的临时取值，生产必须启用 TLS。
+    # 注意：characterEncoding 必须是 Java 字符集名（UTF-8），
+    # 不能写 utf8mb4 —— Connector/J 会抛 "Unsupported character encoding 'utf8mb4'"。
+    # 服务端侧字符集由库表 DDL 的 utf8mb4 保证。
+    # MYSQL_URL 示例（需自带内网参数）：
+    #   jdbc:mysql://<host>:3306/aftersales_kb?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+    url: ${MYSQL_URL:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: ${MYSQL_USER:}
+    password: ${MYSQL_PASSWORD:}
+    # 生产化：显式约束连接池，避免默认无限/长超时在故障时拖垮请求线程
+    hikari:
+      pool-name: aftersales-kb-pool
+      # R-03：知识编码序列预留走 REQUIRES_NEW，峰值每个并发导入占用 2 个连接，
+      # 故 maximum-pool-size 须 >= 2 × app.upload.max-concurrent-requests + 余量。
+      # 默认 10 支撑 app.upload.max-concurrent-requests=4（峰值 8，余量 2）；
+      # 调高并发上限时务必同步调高本值，否则序列预留会抛 CannotGetJdbcConnectionException。
+      # R-03 fail-closed：本值【必须 >= 4】（= 2 连接 + 余量 2），否则 KnowledgeImportService
+      # 启动直接失败（拒绝以 1 作为危险下限）。生产固定 10 时请视其为运行约束，不得漂移到 < 4。
+      maximum-pool-size: ${MYSQL_POOL_MAX:10}
+      minimum-idle: ${MYSQL_POOL_MIN:2}
+      connection-timeout: 3000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      # R-03 尾延迟护栏。**注意作用域**：Hikari 对每条池化连接执行一次本 SQL，故这是
+      # **连接级/池级全局**设置——不仅序列预留，**所有**走该池的查询，其锁等待上限都从
+      # MySQL 默认 50s 降到 5s（有意取舍：当前应用事务都很短，5s 充裕，换取「尾延迟有界」）。
+      # 序列预留的 SELECT ... FOR UPDATE 若发生锁等待，最坏以 50s×重试次数 占住上传线程；
+      # 下调后预留重试周期有界（默认 5s × 3 次 ≈ 15s 上限）。
+      # 仅 mysql profile 生效；h2 测试不加载本文件，故不受影响。
+      # 恢复 MySQL 默认：设 MYSQL_LOCK_WAIT_TIMEOUT=50。若只想为预留单独收紧，可在预留事务内
+      # 单独 SET（影响面更小但复杂度更高，非必需）。
+      connection-init-sql: "SET SESSION innodb_lock_wait_timeout = ${MYSQL_LOCK_WAIT_TIMEOUT:5}"
+  lifecycle:
+    # 优雅停机：等待在途请求（含 SSE 流）在超时内完成再退出
+    timeout-per-shutdown-phase: 20s
+  sql:
+    init:
+      # 建表由 schema-mysql.sql / data-mysql.sql 手工执行，应用启动不自动执行 DDL
+      mode: never
+  data:
+    redis:
+      # Redis 连接同样外置（安全审计 S1）：REDIS_HOST / REDIS_PORT / REDIS_PASSWORD
+      host: ${REDIS_HOST:}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+
+server:
+  # 优雅停机（与 spring.lifecycle.timeout-per-shutdown-phase 配合）
+  shutdown: graceful

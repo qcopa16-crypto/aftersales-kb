@@ -21,10 +21,6 @@ def get_trace_id() -> str:
     return _trace_id.get()
 
 
-def reset_trace_id(token) -> None:  # type: ignore[no-untyped-def]
-    _trace_id.reset(token)
-
-
 class TraceIdFilter(logging.Filter):
     """Inject trace_id into every log record for format %(trace_id)s."""
 

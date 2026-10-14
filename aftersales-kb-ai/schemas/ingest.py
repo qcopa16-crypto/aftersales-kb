@@ -3,6 +3,7 @@
 Also re-exports retrieve/generate DTOs for backward compatibility
 (`from schemas.ingest import RetrieveRequest, ...`).
 """
+
 from pydantic import BaseModel, Field
 
 from schemas.generate import GenerateContext, GenerateRequest  # noqa: F401
@@ -132,3 +133,49 @@ class ParseTaskStatus(BaseModel):
     result: ParseResponse | None = None
     created_at: float
     updated_at: float
+
+
+# --------------------------------------------------------------------------- #
+# Ingest review gate (/internal/review) — 阶段1 AI 三档判定契约
+# --------------------------------------------------------------------------- #
+class ReviewImage(BaseModel):
+    relative_path: str
+    # 调用方可直接给图片字节（base64）；不给则 AI 侧尝试按 content_hash 解析缓存。
+    data_b64: str | None = None
+
+
+class ReviewRequest(BaseModel):
+    unit_id: str = Field(min_length=1)
+    category: str | None = None
+    markdown: str = ""
+    # [{chunk_index, content, heading_path?}]
+    chunks: list[dict] = Field(default_factory=list)
+    # ParseQuality 的 dict；不给则由 AI 用 build_quality 重算。
+    quality: dict | None = None
+    images: list[ReviewImage] = Field(default_factory=list)
+    enable_llm: bool = True
+    enable_vlm: bool = True
+    content_hash: str | None = None
+    ingest_id: str | None = None
+
+
+class VlmFinding(BaseModel):
+    relative_path: str
+    usable: bool
+    reason: str = ""
+
+
+class ReviewResponse(BaseModel):
+    # "pass" | "review"（稳定枚举，见 ai.ingest.review.REVIEW_VERDICTS）
+    verdict: str
+    confidence: float = 0.0
+    reasons: list[str] = Field(default_factory=list)
+    # {"rules": "pass|review", "llm": "pass|review|skipped|error",
+    #  "vlm": "pass|review|skipped|unavailable|error"}
+    tiers: dict[str, str] = Field(default_factory=dict)
+    coverage: dict = Field(default_factory=dict)
+    vlm_findings: list[VlmFinding] = Field(default_factory=list)
+    model: str = ""
+    # llm_ms / vlm_ms wall-clock（observability；additive）。
+    stage_timings: dict[str, float] = Field(default_factory=dict)
+    ingest_id: str | None = None

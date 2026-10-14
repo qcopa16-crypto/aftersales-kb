@@ -67,7 +67,9 @@ def build_quality(
 
     reasons: list[str] = []
     if file_type == "pdf":
-        if (page_count is not None and page_count >= cfg.qc_pdf_page_review) or md_chars >= cfg.qc_md_chars_review:
+        if (
+            page_count is not None and page_count >= cfg.qc_pdf_page_review
+        ) or md_chars >= cfg.qc_md_chars_review:
             reasons.append("product_manual_heuristic")
     elif md_chars >= cfg.qc_md_chars_review:
         reasons.append("product_manual_heuristic")

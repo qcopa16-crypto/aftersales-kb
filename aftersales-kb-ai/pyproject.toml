@@ -1,0 +1,42 @@
+# =========================================================
+# Ruff 配置 —— 对齐《代码设计规范.md》§2.1/§2.2/§2.3/§9.4 的 Python 契约
+# 此前仓库无任何 lint/format 配置（CI 仅跑 pytest），本文件为其代码风格契约。
+# =========================================================
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+# 运行态/数据目录不纳入检查
+extend-exclude = [
+    ".data",
+    "samples",
+    "docs",
+    "mineru_out",
+    "uploads",
+]
+
+[tool.ruff.lint]
+# E/W = pycodestyle（空白、缩进、无效转义）
+# F   = pyflakes（未用导入/变量、未定义名）
+# 暂不启用 I(isort)：tests/ 存在"import 与 get_settings.cache_clear() 刻意交错"的顺序，
+# 自动排序会破坏该语义，需单独评审后再开。
+select = ["E", "W", "F"]
+ignore = [
+    "E501",  # 行宽由 formatter 负责；E501 对注释/长字符串会误报
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+# =========================================================
+# pytest 配置 —— 统一默认离线收集口径（P2-1）
+# 默认离线（REAL_CHAIN_ENABLED != 1）不收集真实链路用例，由仓库根 conftest.py 的
+# collect_ignore 实现；此处仅注册 marker，便于 `-m real_chain` 显式筛选。
+# =========================================================
+[tool.pytest.ini_options]
+markers = [
+    "real_chain: 需要真实 Milvus/BGE/MinerU/云 LLM 的链路用例（默认离线不收集，需 REAL_CHAIN_ENABLED=1 显式运行）",
+]

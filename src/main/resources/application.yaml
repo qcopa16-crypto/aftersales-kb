@@ -1,3 +1,171 @@
 spring:
   application:
     name: aftersales-kb
+  profiles:
+    # fail-closed（安全审计 S4）：基线不再提供任何默认 profile。
+    # 必须显式指定 SPRING_PROFILES_ACTIVE，否则无 profile 启动 ——
+    # StartupSecurityValidator 会将「无 profile」视为非开发环境并拒绝使用内置默认密钥启动。
+    # 本地开发：SPRING_PROFILES_ACTIVE=h2（内存库）或 mysql；生产：mysql。
+    active: ${SPRING_PROFILES_ACTIVE:}
+  jackson:
+    default-property-inclusion: non_null
+  servlet:
+    multipart:
+      # Spring Boot 默认单文件仅 1MB —— 真实产品手册 PDF 动辄几十 MB，会被
+      # 直接拒成「系统错误」。这里与 AI 侧 max_source_bytes(200MB) 对齐。
+      max-file-size: 200MB
+      max-request-size: 512MB
+
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true
+  type-aliases-package: com.shuidun.kb
+
+jwt:
+  # 密钥从配置读取，禁止硬编码到业务代码（代码设计规范 §3.4）
+  # 基线不提供任何默认值：生产必须通过环境变量 JWT_SECRET 提供（>= 32 字节）
+  # 开发 profile（h2）在 application-h2.yaml 中提供内置默认值
+  secret: ${JWT_SECRET:}
+  expire-seconds: 7200
+  issuer: aftersales-kb
+
+ai:
+  # 内网调用 FastAPI（代码设计规范 §3.8 / integration.md）
+  base-url: ${AI_BASE_URL:http://127.0.0.1:8000}
+  # 基线不提供默认值；开发 profile（h2）提供 change-me，生产必须由 AI_INTERNAL_TOKEN 提供
+  internal-token: ${AI_INTERNAL_TOKEN:}
+  connect-timeout-ms: 5000
+  parse-timeout-ms: 900000
+  embed-timeout-ms: 120000
+  retrieve-timeout-ms: 15000
+  # 删除单元向量 / VLM 图注的独立超时（各自操作特性不同，避免互相牵连）
+  delete-timeout-ms: 15000
+  # VLM 图注（POST /internal/vlm/describe）超时（毫秒）
+  vlm-timeout-ms: 60000
+  # 入库质检（POST /internal/review）独立读超时（毫秒）：F-22 必须 > AI 侧 LLM+VLM
+  # 最坏串行预算（review_llm_timeout_sec=20 + review_vlm_timeout_sec=60 = 80s）+ 余量，
+  # 默认 95000；仍然有界，禁止配置为无上限。
+  review-timeout-ms: ${AI_REVIEW_TIMEOUT_MS:95000}
+  generate-timeout-ms: 180000
+  # 会话记忆 /internal/session/append 的短超时（best-effort，绝不拖慢问答主链路）
+  session-timeout-ms: 1000
+  # owner_id 盐（sha256(userId+盐)[:16]）；生产应通过环境变量覆盖
+  session-owner-salt: ${AI_SESSION_OWNER_SALT:aftersales-kb-owner-salt}
+  # 闲聊/通用问答兜底（默认关）：知识库没命中且问题非业务性时，用 AI 通用知识回答。
+  # 全自动模式下业务词表是唯一安全网，默认关闭便于灰度；关闭时行为与历史完全一致。
+  chat-fallback-enabled: ${AI_CHAT_FALLBACK_ENABLED:false}
+  # 业务性关键词补充表（运营可配），与内置词表取并集（只增不减）。
+  chat-business-keywords: []
+
+app:
+  ingest:
+    worker:
+      # F-02 入库 Worker 租约（毫秒）：领取即登记 claimed_by/lease_until，阶段推进即心跳续租；
+      # 必须大于单次 AI 调用最坏耗时（parse 最坏 15 分钟），崩溃后租约过期的作业可被任意实例回收。
+      lease-ms: ${INGEST_WORKER_LEASE_MS:1200000}
+      # 可重试失败的退避基数（毫秒），第 n 次 = base << (n-1)；下次可见时间持久化到 not_before 列
+      retry-backoff-ms: ${INGEST_WORKER_RETRY_BACKOFF_MS:1000}
+      # R-02 单文件解析硬上限（字节）：超过即拒绝入库（错误码 FILE_TOO_LARGE_FOR_PARSE），默认 200MiB，
+      # 与 spring.servlet.multipart.max-file-size / AI 侧 max_source_bytes 对齐。
+      max-parse-file-bytes: ${INGEST_WORKER_MAX_PARSE_FILE_BYTES:209715200}
+      # R-02 解析阶段进程内堆内存总预算（字节）：预留量 = 文件字节 × parse-heap-factor；
+      # 单文件「实际最大可接受大小」= min(max-parse-file-bytes, memory-budget-bytes / parse-heap-factor)。
+      # 预算不足的作业本轮不领取（保持 queued 排队），绝不把整文件读入堆后再判断。默认 512MiB。
+      memory-budget-bytes: ${INGEST_WORKER_MEMORY_BUDGET_BYTES:536870912}
+      # R-02 单文件堆放大系数：完整文件在 Java 侧同时存在于 byte[] 与 AI 请求缓冲中，默认 2。
+      parse-heap-factor: ${INGEST_WORKER_PARSE_HEAP_FACTOR:2}
+    quality:
+      # 总开关：false = 历史行为（仅 product 停门），可秒级回滚。
+      enabled: ${INGEST_QUALITY_ENABLED:true}
+      # 允许 AI 自动通过的类别。
+      auto-categories: [product, sop]
+      # 永远人工的类别（金额/价格/对外承诺），属相对历史的收紧（原为自动放行）。
+      manual-categories: [finance, sales, policy]
+      # manual 类别是否先做「AI 预审 + 人工确认」：true = 仍跑 AI 审核并把结论作为预审意见
+      # （落审计 + 批次详情暴露 aiVerdict/aiReasons/aiModel），但决策恒为人工（停在质检门）；
+      # false = 历史行为（不调 AI，直接转人工）。AI 失败/超时/熔断不影响人工决策。
+      pre-review-manual-categories: ${INGEST_PRE_REVIEW_MANUAL:true}
+      # LLM / VLM 档开关。
+      llm-enabled: true
+      vlm-enabled: true
+      # image_count_high 时 VLM 不可用是否 fail-closed 转人工。
+      vlm-required: true
+      # 自动通过所需最低置信度。
+      llm-confidence-threshold: 0.8
+      # 质检熔断：连续失败阈值与冷却时长（毫秒）。
+      review-circuit-failure-threshold: 3
+      review-circuit-cooldown-ms: 60000
+  storage:
+    # R-05 多实例部署标记：true 时强制共享卷声明 + 稳定 node-id + 完整成员名单 + 跨节点可见性探测；
+    # 未确认时暂停本节点全部入库作业分配（fail-safe，宁可暂停也不读到错误文件）。默认 false（单实例）。
+    # R-02：单实例（false，默认）不受任何成员名单门禁影响，正常启动。
+    multi-instance: ${APP_STORAGE_MULTI_INSTANCE:false}
+    # R-05 共享卷显式声明（运维契约）：多实例部署必须为 true，否则启动直接失败。
+    shared-volume: ${APP_STORAGE_SHARED_VOLUME:false}
+    # R-05/R-02 本节点标识：多实例【必须】显式注入跨重启稳定的 ID（如 Pod 名/主机名 + 序号）；
+    # 缺省（主机名+随机后缀）只适用于单实例，多实例下随机值无法稳定匹配成员名单，会启动失败。
+    node-id: ${APP_STORAGE_NODE_ID:}
+    # R-05/R-02 预期集群节点 ID 集合（逗号分隔，含本节点在内的全部副本 ID）：多实例【强制门禁】——
+    # 必须非空、无重复、含本节点、至少含一个对端，并与部署副本成员集合一致；否则【启动失败】
+    # （fail-closed，不再仅告警），运行期探测亦 fail-closed 禁止领取作业。要求「预期集合内全部节点
+    # 对同一卷可见」才置就绪，从而识别分区子集（两组各自看到 peer、却互不可见的孤岛）。
+    # 例：APP_STORAGE_EXPECTED_NODE_IDS=node-a,node-b,node-c
+    # 若无法满足（如临时单实例），请保持 multi-instance=false 或改用集中式对象存储。
+    expected-node-ids: ${APP_STORAGE_EXPECTED_NODE_IDS:}
+    # R-05 对端 marker 保鲜时长（毫秒）：超过该时长视为陈旧，不计入跨节点可见性判定。
+    # 注意：掉 1 个节点后，存活节点超过该窗口也会暂停入库分配（见 FileStorageService 类注释）。
+    peer-probe-max-age-ms: ${APP_STORAGE_PEER_PROBE_MAX_AGE_MS:300000}
+    # R-05 跨节点探测最小刷新间隔（毫秒）：避免每次取用都扫描 marker 目录。
+    peer-probe-interval-ms: ${APP_STORAGE_PEER_PROBE_INTERVAL_MS:10000}
+    # 上传文件落盘根目录（R-07）。
+    local-path: ${APP_STORAGE_LOCAL_PATH:./data/uploads}
+    # R-07 落盘前要求的最小剩余空间（字节）；低于该阈值拒绝上传。
+    min-free-bytes: ${APP_STORAGE_MIN_FREE_BYTES:1073741824}
+  upload:
+    # R-07 单次请求所有文件的总大小上限（字节）：与 spring.servlet.multipart.max-request-size 对齐。
+    max-request-bytes: ${APP_UPLOAD_MAX_REQUEST_BYTES:536870912}
+    # R-07 并发上传请求上限：限制同时占用的临时磁盘与处理资源。
+    #
+    # R-03 连接池约束（重要，勿忽略）：知识编码序列预留运行在独立的 REQUIRES_NEW 事务中，
+    # 因此每个并发导入在峰值会同时占用 2 个 JDBC 连接（外层导入事务 + 内层预留事务）。
+    # 要求：spring.datasource.hikari.maximum-pool-size >= 2 × max-concurrent-requests + 余量。
+    # 默认 pool=10（见 application-mysql.yaml）、本值=4 → 峰值 8，余量 2（恰好满足）。
+    # 池不足时序列预留会抛 CannotGetJdbcConnectionException（属 DataAccessException，不被预留的
+    # PessimisticLockingFailureException 重试捕获）→ 导入 500。R-06：启动期 KnowledgeImportService
+    # 会按连接池容量【自动收敛 uploadPermits 到安全值】(floor((pool-余量)/2))，不再只 WARN；如需保留
+    # 配置的高并发，请同步提高 maximum-pool-size。
+    # R-03 fail-closed：池上限【必须 >= 4】（= 2 + 余量 2），否则连一个导入都无法安全支撑，
+    # KnowledgeImportService 启动直接失败（不再以 1 作为危险下限）。生产固定 Hikari 10 时，请把
+    # maximum-pool-size=10 视为运行约束，拒绝把配置漂移到 < 4 的不安全值。
+    # 可用 app.upload.pool-metrics-interval-ms 周期观测 Hikari active/idle/total/pending 与
+    # configured/effective/poolMax（默认 600000ms）；同时以 Micrometer gauge
+    # app.upload.concurrency.{configured,effective} 与 app.upload.pool.{max,pending} 暴露。
+    max-concurrent-requests: ${APP_UPLOAD_MAX_CONCURRENT_REQUESTS:4}
+    # R-06 Hikari 连接池指标日志间隔（毫秒）；首次输出延迟同值，避免启动即刷屏。
+    pool-metrics-interval-ms: ${APP_UPLOAD_POOL_METRICS_INTERVAL_MS:600000}
+
+# 生产化：仅暴露健康检查与运行信息端点，其余端点保持关闭（安全审计默认最小暴露）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    # 基线默认 info，可由环境变量 LOG_LEVEL 覆盖（如 debug 用于本地排查）
+    com.shuidun.kb: ${LOG_LEVEL:info}
+
+---
+# h2（本地开发/自动化测试）profile：打开 debug 日志便于排查。
+# 说明：本环境读取 application-h2.yaml 被安全审批拦截，故改用本 profile 文档实现等价覆盖。
+spring:
+  config:
+    activate:
+      on-profile: h2
+logging:
+  level:
+    com.shuidun.kb: debug

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -54,7 +54,9 @@ class CircuitBreaker:
                 out[name] = {
                     "failures": st.failures,
                     "open": bool(st.open_until and now < st.open_until),
-                    "open_for_sec": max(0.0, round(st.open_until - now, 1)) if st.open_until > now else 0.0,
+                    "open_for_sec": max(0.0, round(st.open_until - now, 1))
+                    if st.open_until > now
+                    else 0.0,
                     "last_error": st.last_error,
                 }
         return out
@@ -80,9 +82,7 @@ class Metrics:
             arr.append(ms)
             if len(arr) > 200:
                 del arr[:-200]
-            buckets = self._histograms.setdefault(
-                name, [0] * (len(self.LATENCY_BUCKETS_MS) + 1)
-            )
+            buckets = self._histograms.setdefault(name, [0] * (len(self.LATENCY_BUCKETS_MS) + 1))
             for i, bound in enumerate(self.LATENCY_BUCKETS_MS):
                 if ms <= bound:
                     buckets[i] += 1

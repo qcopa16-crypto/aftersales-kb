@@ -45,6 +45,7 @@ def run_parse(
 ) -> ParseResponse:
     """Run LangGraph ingest and map state → ParseResponse."""
     from ai.ingest.fingerprint import chunks_fingerprint, content_fingerprint
+    from ai.ingest.review_image_cache import cache_review_images
 
     try:
         state = run_ingest_graph(
@@ -72,6 +73,10 @@ def run_parse(
     raw_images = state.get("images") or []
     q = state.get("quality") or {}
     text = state.get("text") or ""
+    content_hash = content_fingerprint(text)
+    # Persist extracted image bytes keyed by content_hash so /internal/review can
+    # run a VLM spot-check without the caller shipping bytes. Silent-degrade.
+    cache_review_images(content_hash, state.get("image_bytes_map") or {}, raw_images, cfg)
     chunk_models = [
         ParseChunk(
             chunk_index=int(c.get("chunk_index") or 0),
@@ -97,7 +102,7 @@ def run_parse(
         file_type=file_type,
         quality=ParseQuality(**{k: q[k] for k in ParseQuality.model_fields if k in q}),
         cache_hit=False,
-        content_hash=content_fingerprint(text),
+        content_hash=content_hash,
         chunks_hash=chunks_fingerprint(
             [
                 {

@@ -8,6 +8,32 @@ from dataclasses import dataclass, field
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 _IMG_ONLY_RE = re.compile(r"^!\[[^\]]*\]\([^)]+\)\s*$")
 _SENT_SPLIT_RE = re.compile(r"(?<=[。！？!?.;；])\s*")
+# Horizontal rules / bare separator lines carry no retrievable content.
+_SEPARATOR_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
+
+
+def _is_noise_piece(text: str) -> bool:
+    """True when a would-be chunk carries no retrievable signal.
+
+    Drops standalone markdown horizontal rules (`---`) and heading-only
+    leftovers. These otherwise occupy a per-unit chunk budget and dilute the
+    dense ranking, starving short answer sections (e.g. a 150-char "升级路径"
+    block) out of the top-k.
+    """
+    core = text.strip()
+    if not core:
+        return True
+    if _SEPARATOR_RE.match(core):
+        return True
+    # Heading-only chunk (no body text under it).
+    no_heading = _HEADING_RE.sub("", core).strip()
+    if not no_heading and core:
+        return True
+    # Pure separator noise mixed with blank lines (e.g. "---\n\n---").
+    lines = [ln.strip() for ln in core.splitlines() if ln.strip()]
+    if lines and all(_SEPARATOR_RE.match(ln) for ln in lines):
+        return True
+    return False
 
 
 def _is_table_line(line: str) -> bool:
@@ -79,19 +105,64 @@ def _split_oversized_table(table: str, size: int) -> list[str]:
     return pieces or [table]
 
 
-def _split_section_body(body: str, size: int, overlap: int) -> list[str]:
+def _split_table_rows(table: str, size: int, max_rows: int) -> list[str]:
+    """Split a markdown table into row-granular chunks, each carrying the header.
+
+    Used for error-code / fee tables so a specific row (e.g. `E-05 盖板未关`)
+    is not diluted inside one monolithic table chunk. Groups up to `max_rows`
+    data rows per chunk (header + separator always prefixed).
+    """
+    lines = [ln for ln in table.splitlines() if ln.strip()]
+    if len(lines) < 3:
+        return [table]
+    header = lines[0].strip()
+    sep = lines[1].strip()
+    if not re.match(r"^\|[\s:\-|]+\|$", sep):
+        return [table]
+    rows = lines[2:]
+    max_rows = max(1, int(max_rows))
+    prefix = f"{header}\n{sep}\n"
+    pieces: list[str] = []
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal buf
+        if buf:
+            pieces.append(prefix + "\n".join(buf))
+            buf = []
+
+    for row in rows:
+        if buf and (len(buf) >= max_rows or len(prefix + "\n".join(buf + [row])) > size):
+            flush()
+        buf.append(row)
+    flush()
+    return pieces or [table]
+
+
+def _split_section_body(
+    body: str,
+    size: int,
+    overlap: int,
+    *,
+    table_row_chunk: bool = True,
+    table_row_group: int = 3,
+) -> list[str]:
     pieces: list[str] = []
     for kind, text in _split_body_blocks(body):
         if kind == "image":
             pieces.append(text)
         elif kind == "table":
-            if len(text) <= size:
+            if table_row_chunk:
+                pieces.extend(_split_table_rows(text, size, table_row_group))
+            elif len(text) <= size:
                 pieces.append(text)
             else:
                 pieces.extend(_split_oversized_table(text, size))
         else:
             pieces.extend(_window_split(text, size, overlap))
-    return pieces
+    # Drop separator-only / heading-only pieces: they hold no retrievable signal
+    # yet still consume the per-unit chunk budget downstream.
+    return [p for p in pieces if not _is_noise_piece(p)]
 
 
 @dataclass
@@ -138,33 +209,17 @@ def _window_split(text: str, size: int, overlap: int) -> list[str]:
     return [p for p in pieces if p]
 
 
-def _extract_images(markdown: str) -> list[dict[str, str]]:
-    images: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for m in re.finditer(r"!\[([^\]]*)\]\(([^)]+)\)", markdown):
-        alt, path = m.group(1), m.group(2).strip()
-        if path in seen:
-            continue
-        seen.add(path)
-        image_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", path)[-64:] or f"img_{len(images)}"
-        images.append(
-            {
-                "image_id": image_id,
-                "relative_path": path,
-                "status": "skipped",
-                "caption": None,
-            }
-        )
-    return images
-
-
 def _table_summary(table: str) -> str:
     """One-line NL summary of a markdown pipe table for retrieval."""
     lines = [ln for ln in table.splitlines() if _is_table_line(ln)]
     if not lines:
         return ""
     header_cells = [c.strip() for c in lines[0].strip("|").split("|")]
-    data_rows = len(lines) - 2 if len(lines) >= 2 and re.match(r"^\|[\s:\-|]+\|$", lines[1].strip()) else max(0, len(lines) - 1)
+    data_rows = (
+        len(lines) - 2
+        if len(lines) >= 2 and re.match(r"^\|[\s:\-|]+\|$", lines[1].strip())
+        else max(0, len(lines) - 1)
+    )
     cols = "、".join(h for h in header_cells if h) or "未知列"
     return f"> 【表格摘要】列：{cols}；数据行约 {data_rows} 行。"
 
@@ -184,6 +239,8 @@ def split_markdown(
     *,
     chunk_size: int = 512,
     chunk_overlap: int = 50,
+    table_row_chunk: bool = True,
+    table_row_group: int = 3,
 ) -> list[Chunk]:
     """Split markdown into chunks with heading paths; tables get NL summaries."""
     if not markdown or not markdown.strip():
@@ -230,7 +287,13 @@ def split_markdown(
             else:
                 annotated_parts.append(text)
         annotated = "\n\n".join(annotated_parts)
-        for piece in _split_section_body(annotated, chunk_size, chunk_overlap):
+        for piece in _split_section_body(
+            annotated,
+            chunk_size,
+            chunk_overlap,
+            table_row_chunk=table_row_chunk,
+            table_row_group=table_row_group,
+        ):
             chunks.append(Chunk(chunk_index=0, content=piece, heading_path=list(path)))
 
     for idx, ch in enumerate(chunks):

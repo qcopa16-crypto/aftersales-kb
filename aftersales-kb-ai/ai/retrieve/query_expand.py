@@ -36,14 +36,42 @@ _SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
     ("恢复", "复位", "出厂"),
 )
 
+# Directed phenomenon -> error-code / jargon mapping (asymmetric, unlike the
+# symmetric synonym groups above). A user often describes a *symptom* ("总是卡纸")
+# while the gold chunk is keyed on the *code* ("E-01 卡纸"); adding the code lets
+# both dense and lexical paths bridge that vocabulary gap.
+#
+# Every expansion token below is verified against docs/demo-knowledge:
+#   sop/故障代码-打印机错误码.md  -> E-01..E-08
+#   sop/故障代码-路由器与网关.md  -> WAN/PWR/SYS rows (光猫/网线/适配器/启动失败)
+#   sop/故障代码-商用电脑.md      -> 风扇狂转 -> 清灰
+_PHENOMENON_TO_CODE: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("卡纸", "夹纸", "塞纸"), ("E-01",)),
+    (("缺纸", "进纸失败", "不进纸", "无法进纸"), ("E-02",)),
+    (("硒鼓", "墨粉", "碳粉", "粉盒"), ("E-03",)),
+    (("定影",), ("E-04",)),
+    (("盖板", "上盖", "后盖"), ("E-05",)),
+    (("通信", "网络错误", "网络故障"), ("E-06",)),
+    (("打印头", "激光单元", "激光器"), ("E-07",)),
+    (("进稿器", "ADF", "输稿器", "原稿进稿器"), ("E-08",)),
+    (("WAN", "WAN 口"), ("光猫", "网线")),
+    (("PWR",), ("适配器",)),
+    (("SYS",), ("启动失败",)),
+    (("风扇狂转", "风扇一直转", "风扇转得", "狂转"), ("清灰",)),
+)
+
 _CODE_RE = re.compile(r"[A-Za-z]{1,4}-?\d{1,4}")
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _CJK_RE = re.compile(r"[一-鿿]+")
 
 
-def expand_terms(question: str) -> list[str]:
-    """Unique expansion tokens (not including the raw question)."""
+def expand_terms(question: str, *, enable_codes: bool = True) -> list[str]:
+    """Unique expansion tokens (not including the raw question).
+
+    ``enable_codes`` toggles the directed phenomenon->error-code mapping
+    (``_PHENOMENON_TO_CODE``); off keeps the legacy synonym-only behaviour.
+    """
     q = question or ""
     low = q.lower()
     out: list[str] = []
@@ -54,6 +82,13 @@ def expand_terms(question: str) -> list[str]:
                 if s.lower() not in seen:
                     seen.add(s.lower())
                     out.append(s)
+    if enable_codes:
+        for triggers, expansions in _PHENOMENON_TO_CODE:
+            if any(t.lower() in low or t in q for t in triggers):
+                for s in expansions:
+                    if s.lower() not in seen:
+                        seen.add(s.lower())
+                        out.append(s)
     # Keep ASCII codes (E-05, LA2608) as extra lexical anchors if present.
     for m in _CODE_RE.finditer(q):
         u = m.group(0).upper()
@@ -63,10 +98,33 @@ def expand_terms(question: str) -> list[str]:
     return out
 
 
-def expand_terms_for_lexical(question: str, *, max_extra: int = 3) -> str:
+def expand_codes(question: str) -> list[str]:
+    """Only the phenomenon->error-code expansions (E-01, E-08, …).
+
+    Unlike `expand_terms`, this returns *codes only* (no 光猫/网线/清灰 jargon).
+    The demo corpus' error codes (E-01..E-08) are synthetic and appear **only**
+    in `sop/故障代码-打印机错误码.md`, so anchoring the rerank stage on them is
+    high-precision: it cannot accidentally promote an unrelated product manual.
+    """
+    q = question or ""
+    low = q.lower()
+    out: list[str] = []
+    seen: set[str] = set()
+    for triggers, expansions in _PHENOMENON_TO_CODE:
+        if any(t.lower() in low or t in q for t in triggers):
+            for s in expansions:
+                if any(ch.isdigit() for ch in s) and s.lower() not in seen:
+                    seen.add(s.lower())
+                    out.append(s)
+    return out
+
+
+def expand_terms_for_lexical(
+    question: str, *, max_extra: int = 3, enable_codes: bool = True
+) -> str:
     """Compact lexical query: original + few high-value extras (avoid posting explosion)."""
     q = (question or "").strip()
-    extra = [t for t in expand_terms(q) if t.lower() not in q.lower()]
+    extra = [t for t in expand_terms(q, enable_codes=enable_codes) if t.lower() not in q.lower()]
     if not extra:
         return q
     # Prefer longer surface forms (more specific) and ASCII codes.
@@ -74,10 +132,12 @@ def expand_terms_for_lexical(question: str, *, max_extra: int = 3) -> str:
     return q + " " + " ".join(extra[:max_extra])
 
 
-def expand_query_texts(question: str, *, max_variants: int = 2) -> list[str]:
+def expand_query_texts(
+    question: str, *, max_variants: int = 2, enable_codes: bool = True
+) -> list[str]:
     """Original question first, then up to max_variants synonym-augmented queries."""
     q = (question or "").strip()
-    terms = expand_terms(q)
+    terms = expand_terms(q, enable_codes=enable_codes)
     extra = [t for t in terms if t.lower() not in q.lower()]
     texts = [q]
     if extra:

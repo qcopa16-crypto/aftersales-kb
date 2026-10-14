@@ -10,12 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
-
-from schemas.ingest import ParseResponse
 
 
 def content_hash(
@@ -90,10 +87,6 @@ def get_parse_cache(max_items: int = 256) -> ParseResultCache:
         if _cache is None:
             _cache = ParseResultCache(max_items=max_items)
         return _cache
-
-
-def to_cached(result: ParseResponse) -> dict[str, Any]:
-    return result.model_dump()
 
 
 def file_content_hash(

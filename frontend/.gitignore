@@ -1,0 +1,14 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+.vite
+
+# 自动生成（unplugin-vue-components），不入库
+components.d.ts
+# 本地调试/备份产物
+dist.bak-*
+_dbg_dist/
+_mc_*/
+_probe_dist/

@@ -172,7 +172,9 @@ class MinerUClient:
                 raise MinerUError("MinerU submit rate limit timeout", "MINERU_RATE_LIMIT") from exc
 
             batch_store.put(file_hash, batch_id, file_name=pdf_path.name)
-            result = self._poll_result(batch_id, on_progress=on_progress, should_cancel=should_cancel)
+            result = self._poll_result(
+                batch_id, on_progress=on_progress, should_cancel=should_cancel
+            )
             out = self._parse_result(result)
             batch_store.clear(file_hash)
             if extract_cache is not None:
@@ -214,12 +216,16 @@ class MinerUClient:
             resp.raise_for_status()
             data = resp.json()
         except httpx.HTTPError as exc:
-            raise MinerUError(f"MinerU upload-url request failed: {exc}", "MINERU_UPLOAD_URL_FAILED") from exc
+            raise MinerUError(
+                f"MinerU upload-url request failed: {exc}", "MINERU_UPLOAD_URL_FAILED"
+            ) from exc
 
         if data.get("code") not in (0, None) and data.get("code") != 0:
             # some gateways omit code on success; only reject explicit non-zero
             if data.get("code") != 0:
-                raise MinerUError(f"MinerU apply url failed: {data.get('msg') or data}", "MINERU_BAD_RESPONSE")
+                raise MinerUError(
+                    f"MinerU apply url failed: {data.get('msg') or data}", "MINERU_BAD_RESPONSE"
+                )
 
         body = data.get("data") or {}
         batch_id = body.get("batch_id")
@@ -346,9 +352,13 @@ class MinerUClient:
         try:
             with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
                 names = zf.namelist()
-                md_name = next((n for n in names if n.endswith("full.md") or n.endswith(".md")), None)
+                md_name = next(
+                    (n for n in names if n.endswith("full.md") or n.endswith(".md")), None
+                )
                 if not md_name:
-                    raise MinerUError(f"zip has no markdown file, entries={names[:20]}", "MINERU_EMPTY_MD")
+                    raise MinerUError(
+                        f"zip has no markdown file, entries={names[:20]}", "MINERU_EMPTY_MD"
+                    )
                 markdown = zf.read(md_name).decode("utf-8", errors="replace")
                 img_idx = 0
                 for n in names:
